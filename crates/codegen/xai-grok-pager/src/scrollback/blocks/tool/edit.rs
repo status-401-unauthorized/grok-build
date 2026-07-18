@@ -816,11 +816,14 @@ impl EditToolCallBlock {
         self
     }
 
-    /// Get copyable text as a unified diff patch.
+    /// Get copyable text as a unified diff patch, or the error when the edit failed.
     ///
     /// Generates a patch format suitable for `git apply` or clipboard sharing.
     pub fn copy_text(&self) -> String {
-        diff_hunks_to_patch(&self.path, &self.hunks)
+        if !self.hunks.is_empty() {
+            return diff_hunks_to_patch(&self.path, &self.hunks);
+        }
+        self.error.clone().unwrap_or_default()
     }
 
     /// Set hunks (mutable).
@@ -1236,14 +1239,18 @@ impl EditToolCallBlock {
                     });
                 }
 
-                // Error message (non-selectable decoration)
+                // Error body is selectable and shares TOOL_HEADER_RANGE with
+                // the path so text drag can span path + failure details.
                 if let Some(err) = &self.error {
                     lines.push(BlockLine::separator(Line::from("")));
                     for line in err.lines() {
-                        lines.push(BlockLine::separator(Line::from(Span::styled(
-                            line.to_string(),
-                            theme.muted(),
-                        ))));
+                        lines.push(
+                            BlockLine::styled(Line::from(Span::styled(
+                                line.to_string(),
+                                theme.muted(),
+                            )))
+                            .with_selection_range(Some(TOOL_HEADER_RANGE)),
+                        );
                     }
                 }
 

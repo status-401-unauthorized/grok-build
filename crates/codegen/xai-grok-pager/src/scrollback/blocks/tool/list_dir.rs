@@ -1,6 +1,6 @@
 //! ListDirToolCallBlock - lists directory contents.
 
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::scrollback::block::BlockContent;
@@ -9,7 +9,10 @@ use crate::scrollback::types::{
 };
 use crate::theme::Theme;
 
-use super::TOOL_HEADER_RANGE;
+use super::{TOOL_HEADER_RANGE, collapsed_error_suffix};
+
+/// Selection range for list output and error-body lines (header is 0).
+const LIST_DIR_BODY_RANGE: u16 = 1;
 
 /// List directory tool call.
 #[derive(Debug, Clone)]
@@ -97,9 +100,10 @@ impl ListDirToolCallBlock {
         self.output = output.into();
     }
 
-    /// Render collapsed line: `List path`.
+    /// Render collapsed line: `List path` (plus a short error suffix on failure).
     ///
-    /// When `width` is provided, the path is fish-shortened to fit.
+    /// When `width` is provided, the path is fish-shortened to fit alongside
+    /// any error suffix.
     fn collapsed_line(&self, theme: &Theme, muted: bool, width: Option<usize>) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
@@ -112,17 +116,31 @@ impl ListDirToolCallBlock {
         } else {
             theme.fg(theme.path)
         };
+        let error_style = if muted {
+            theme.muted()
+        } else {
+            Style::default().fg(theme.accent_error)
+        };
 
         let prefix = "List ";
+        let error_suffix = self
+            .error
+            .as_ref()
+            .map(|e| collapsed_error_suffix(e, 48))
+            .unwrap_or_default();
         let path_budget = width
-            .map(|w| w.saturating_sub(prefix.len()))
+            .map(|w| w.saturating_sub(prefix.len() + error_suffix.len()))
             .unwrap_or(usize::MAX);
         let path = crate::render::tool_paths::shorten_path(&self.path, path_budget);
 
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(prefix, bold_style),
             Span::styled(path, path_style),
-        ])
+        ];
+        if !error_suffix.is_empty() {
+            spans.push(Span::styled(error_suffix, error_style));
+        }
+        Line::from(spans)
     }
 
     /// Header line with only the path span selectable (exclude "List " prefix).
@@ -157,7 +175,21 @@ impl BlockContent for ListDirToolCallBlock {
                 let mut lines: Vec<BlockLine> =
                     vec![self.header_block_line(self.collapsed_line(&theme, false, None))];
 
-                if !self.output.is_empty() {
+                if let Some(err) = &self.error {
+                    // Blank gap is decoration. Error body shares the header
+                    // range so text drag can span path + failure details.
+                    lines.push(BlockLine::separator(Line::from("")));
+                    let error_style = Style::default().fg(theme.accent_error);
+                    for line in err.lines() {
+                        lines.push(
+                            BlockLine::styled(Line::from(Span::styled(
+                                line.to_string(),
+                                error_style,
+                            )))
+                            .with_selection_range(Some(TOOL_HEADER_RANGE)),
+                        );
+                    }
+                } else if !self.output.is_empty() {
                     lines.push(BlockLine::separator(Line::from("")));
 
                     for rl in crate::render::terminal_output::render_terminal_lines(
@@ -168,6 +200,7 @@ impl BlockContent for ListDirToolCallBlock {
                         let mut spans = vec![Span::styled("  ".to_string(), theme.primary())];
                         spans.extend(rl.line.spans);
                         let mut block_line: BlockLine = Line::from(spans).into();
+                        block_line = block_line.with_selection_range(Some(LIST_DIR_BODY_RANGE));
                         if terminal_bg {
                             block_line = block_line.with_panel_background(theme.bg_dark);
                         }
@@ -206,11 +239,9 @@ impl BlockContent for ListDirToolCallBlock {
     }
 
     fn is_foldable(&self) -> bool {
-        // Not foldable if failed
-        if self.error.is_some() {
-            return false;
-        }
-        !self.output.is_empty()
+        // Listing content, or a failure message the user can expand to read
+        // in full (collapsed already shows a short error suffix).
+        !self.output.is_empty() || self.error.is_some()
     }
 
     fn default_display_mode(&self) -> DisplayMode {
@@ -222,5 +253,111 @@ impl BlockContent for ListDirToolCallBlock {
             DisplayMode::Collapsed => DisplayMode::Expanded,
             _ => DisplayMode::Collapsed,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scrollback::types::{BlockContext, DisplayMode};
+
+    fn make_ctx() -> BlockContext {
+        BlockContext {
+            width: 80,
+            mode: DisplayMode::Collapsed,
+            is_running: false,
+            raw: false,
+            max_lines: None,
+            appearance: Default::default(),
+            is_selected: false,
+            cwd: None,
+        }
+    }
+
+    fn header_text(block: &ListDirToolCallBlock, ctx: &BlockContext) -> String {
+        block.output(ctx).lines[0]
+            .content
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn collapsed_failure_shows_path_and_error_reason() {
+        let block = ListDirToolCallBlock::new(".claude/skills")
+            .with_error("Error: Directory does not exist: .claude/skills");
+        let text = header_text(&block, &make_ctx());
+        assert_eq!(
+            text, "List .claude/skills — Directory does not exist",
+            "path once in tool target; reason without path suffix, got '{text}'"
+        );
+    }
+
+    #[test]
+    fn foldable_when_error_even_without_output() {
+        let block =
+            ListDirToolCallBlock::new("missing").with_error("Permission denied: missing");
+        assert!(block.is_foldable());
+    }
+
+    #[test]
+    fn not_foldable_when_empty_success() {
+        let block = ListDirToolCallBlock::new("empty");
+        assert!(!block.is_foldable());
+    }
+
+    #[test]
+    fn expanded_failure_shows_full_error_body() {
+        let block = ListDirToolCallBlock::new("secret")
+            .with_error("Permission denied: secret\n(no listing available)");
+        let mut ctx = make_ctx();
+        ctx.mode = DisplayMode::Expanded;
+        let all_text: String = block
+            .output(&ctx)
+            .lines
+            .iter()
+            .map(|l| {
+                l.content
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_text.contains("Permission denied: secret"),
+            "got '{all_text}'"
+        );
+        assert!(
+            all_text.contains("(no listing available)"),
+            "got '{all_text}'"
+        );
+    }
+
+    #[test]
+    fn expanded_failure_error_lines_are_selectable() {
+        let block = ListDirToolCallBlock::new("secret")
+            .with_error("Permission denied: secret\n(no listing available)");
+        let mut ctx = make_ctx();
+        ctx.mode = DisplayMode::Expanded;
+        let output = block.output(&ctx);
+        let body: Vec<_> = output
+            .lines
+            .iter()
+            .filter(|l| l.selection_range == Some(TOOL_HEADER_RANGE))
+            .filter(|l| !matches!(l.selectable, Selectable::Spans(_)))
+            .collect();
+        assert_eq!(body.len(), 2, "both error lines should be selectable");
+        assert!(
+            body.iter()
+                .all(|l| !matches!(l.selectable, Selectable::None))
+        );
+        assert_eq!(
+            output.lines[0].selection_range,
+            Some(TOOL_HEADER_RANGE),
+            "error body must share the header range"
+        );
     }
 }

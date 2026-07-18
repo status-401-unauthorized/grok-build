@@ -17,6 +17,8 @@ use crate::theme::Theme;
 
 const FIRST_LINES: usize = 5;
 const LAST_LINES: usize = 3;
+/// Selection range for file content preview and error-body lines (header is 0).
+const READ_BODY_RANGE: u16 = 1;
 
 use xai_grok_tools::implementations::skills::types::skill_name_from_path;
 
@@ -146,6 +148,12 @@ impl ReadToolCallBlock {
     }
 
     /// Render header line: `Read path (start-end)`.
+    ///
+    /// Path paint matches success: basename when collapsed, relative when
+    /// expanded, normalized absolute for fullscreen. On failure, a short
+    /// reason suffix is appended only while collapsed; expanded/truncated
+    /// headers stay path-only so the full error (often including absolute
+    /// path) lives in the details body.
     fn collapsed_line(
         &self,
         theme: &Theme,
@@ -171,13 +179,32 @@ impl ReadToolCallBlock {
         } else {
             theme.muted()
         };
+        let error_style = if muted {
+            theme.muted()
+        } else {
+            Style::default().fg(theme.accent_error)
+        };
 
-        // SKILL.md reads render as "Skill {skill_name}".
+        let collapsed = matches!(
+            surface,
+            crate::render::tool_paths::ToolPathSurface::Collapsed
+        );
+
+        // SKILL.md reads render as "Skill {skill_name}" (+ collapsed error).
         if let Some(skill) = self.skill_name() {
-            return Line::from(vec![
+            let mut spans = vec![
                 Span::styled("Skill ", bold_style),
                 Span::styled(skill.to_owned(), path_style),
-            ]);
+            ];
+            if collapsed
+                && let Some(err) = &self.error
+            {
+                spans.push(Span::styled(
+                    super::collapsed_error_suffix(err, 48),
+                    error_style,
+                ));
+            }
+            return Line::from(spans);
         }
 
         let prefix = "Read ";
@@ -193,8 +220,10 @@ impl ReadToolCallBlock {
                 }
             })
             .unwrap_or_default();
-        // Extra suffix for errors or empty content
-        let extra_suffix = if self.content.as_ref().is_some_and(|c| c.is_empty()) {
+        // Extra suffix for empty content or media (errors use their own suffix).
+        let extra_suffix = if self.error.is_some() {
+            String::new()
+        } else if self.content.as_ref().is_some_and(|c| c.is_empty()) {
             " (empty)".to_string()
         } else if let Some(media) = &self.media_kind {
             match media {
@@ -204,7 +233,17 @@ impl ReadToolCallBlock {
         } else {
             String::new()
         };
-        let total_suffix_len = range_suffix.len() + extra_suffix.len();
+        // Collapsed only: keep a short reason on the one-liner. Expanded
+        // headers stay path-only; the full message is in the details body.
+        let error_suffix = if collapsed {
+            self.error
+                .as_ref()
+                .map(|e| super::collapsed_error_suffix(e, 48))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let total_suffix_len = range_suffix.len() + extra_suffix.len() + error_suffix.len();
         let path = crate::render::tool_paths::path_for_tool_surface(
             &self.path,
             surface,
@@ -224,6 +263,10 @@ impl ReadToolCallBlock {
 
         if !extra_suffix.is_empty() {
             spans.push(Span::styled(extra_suffix, detail_style));
+        }
+
+        if !error_suffix.is_empty() {
+            spans.push(Span::styled(error_suffix, error_style));
         }
 
         Line::from(spans)
@@ -303,6 +346,7 @@ impl ReadToolCallBlock {
                     lines.push(
                         BlockLine::styled(wrapped_line.clone())
                             .with_panel_background(theme.bg_dark)
+                            .with_selection_range(Some(READ_BODY_RANGE))
                             .with_joiner(joiner.clone()),
                     );
                 }
@@ -315,6 +359,7 @@ impl ReadToolCallBlock {
                     lines.push(
                         BlockLine::styled(wrapped_line.clone())
                             .with_panel_background(theme.bg_dark)
+                            .with_selection_range(Some(READ_BODY_RANGE + 1))
                             .with_joiner(joiner.clone()),
                     );
                 }
@@ -323,6 +368,7 @@ impl ReadToolCallBlock {
                     lines.push(
                         BlockLine::styled(wrapped_line)
                             .with_panel_background(theme.bg_dark)
+                            .with_selection_range(Some(READ_BODY_RANGE))
                             .with_joiner(joiner),
                     );
                 }
@@ -332,12 +378,21 @@ impl ReadToolCallBlock {
                 lines.push(
                     BlockLine::styled(wrapped_line)
                         .with_panel_background(theme.bg_dark)
+                        .with_selection_range(Some(READ_BODY_RANGE))
                         .with_joiner(joiner),
                 );
             }
         }
 
         lines
+    }
+
+    /// Copyable body: file content when present, otherwise the error message.
+    pub fn copy_text(&self) -> Option<String> {
+        self.content
+            .clone()
+            .filter(|c| !c.is_empty())
+            .or_else(|| self.error.clone())
     }
 }
 
@@ -386,13 +441,22 @@ impl BlockContent for ReadToolCallBlock {
                     lines.push(BlockLine::separator(Line::from("")));
                     lines.extend(self.render_content_lines(&theme, ctx.width as usize, truncate));
                 } else if let Some(err) = &self.error {
+                    // Blank gap is decoration. Error body is selectable and
+                    // shares TOOL_HEADER_RANGE with the path so a text drag
+                    // that starts on the filename can extend into the error
+                    // details (and vice versa). Separate range ids would
+                    // confine the highlight to a single line/band and force
+                    // whole-block drag for the body.
                     lines.push(BlockLine::separator(Line::from("")));
                     let error_style = Style::default().fg(theme.accent_error);
                     for line in err.lines() {
-                        lines.push(BlockLine::separator(Line::from(Span::styled(
-                            line.to_string(),
-                            error_style,
-                        ))));
+                        lines.push(
+                            BlockLine::styled(Line::from(Span::styled(
+                                line.to_string(),
+                                error_style,
+                            )))
+                            .with_selection_range(Some(TOOL_HEADER_RANGE)),
+                        );
                     }
                 }
                 BlockOutput { lines }
@@ -426,7 +490,9 @@ impl BlockContent for ReadToolCallBlock {
     }
 
     fn is_foldable(&self) -> bool {
-        self.has_content()
+        // Content preview *or* a failure message the user can expand to read
+        // in full (collapsed shows basename + a short error suffix).
+        self.has_content() || self.error.is_some()
     }
 
     fn default_display_mode(&self) -> DisplayMode {
@@ -439,6 +505,11 @@ impl BlockContent for ReadToolCallBlock {
 
     fn next_fold_mode(&self, current: DisplayMode, _is_running: bool) -> DisplayMode {
         match current {
+            // Failures only have the error body (no content preview), so jump
+            // straight to Expanded rather than Truncated.
+            DisplayMode::Collapsed if self.error.is_some() && !self.has_content() => {
+                DisplayMode::Expanded
+            }
             DisplayMode::Collapsed => DisplayMode::Truncated,
             DisplayMode::Truncated | DisplayMode::Expanded => DisplayMode::Collapsed,
         }
@@ -687,6 +758,250 @@ mod tests {
     }
 
     #[test]
+    fn foldable_when_error_even_without_content() {
+        let block = ReadToolCallBlock::new("gone.rs").with_error("no such file");
+        assert!(block.is_foldable());
+    }
+
+    #[test]
+    fn collapsed_failure_shows_basename_and_error_reason() {
+        let abs = "/Users/me/project/src/gone.rs";
+        // Production not-found shape embeds the absolute path in the message.
+        let err = "Error: /Users/me/project/src/gone.rs does not exist.";
+        let block = ReadToolCallBlock::new(abs).with_error(err);
+        let mut ctx = make_ctx();
+        ctx.cwd = Some(std::path::PathBuf::from("/Users/me/project"));
+        let output = block.output(&ctx);
+        let text: String = output.lines[0]
+            .content
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        // Same path paint as success (basename) + short reason without path.
+        assert_eq!(
+            output.lines[0].content.spans[1].content.as_ref(),
+            "gone.rs",
+            "failed collapsed read should show basename only, got '{text}'"
+        );
+        assert!(
+            !text.contains("src/gone.rs"),
+            "failed collapsed read must not show relative path in header, got '{text}'"
+        );
+        assert!(
+            !text.contains("/Users/me/project"),
+            "failed collapsed read must not show absolute path in header, got '{text}'"
+        );
+        assert!(
+            text.contains("does not exist"),
+            "failed read should show reason, got '{text}'"
+        );
+        assert_eq!(
+            text, "Read gone.rs — does not exist",
+            "got '{text}'"
+        );
+    }
+
+    #[test]
+    fn expanded_failure_header_is_relative_path_only() {
+        let abs = "/Users/me/project/src/gone.rs";
+        let err = "Error: /Users/me/project/src/gone.rs does not exist.";
+        let block = ReadToolCallBlock::new(abs).with_error(err);
+        let mut ctx = make_ctx();
+        ctx.mode = DisplayMode::Expanded;
+        ctx.cwd = Some(std::path::PathBuf::from("/Users/me/project"));
+        let output = block.output(&ctx);
+        let header: String = output.lines[0]
+            .content
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(
+            header, "Read src/gone.rs",
+            "expanded failure header should be relative path only, got '{header}'"
+        );
+        let body: String = output
+            .lines
+            .iter()
+            .skip(1)
+            .map(|l| {
+                l.content
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains(err),
+            "expanded failure body should include full error, got '{body}'"
+        );
+    }
+
+    #[test]
+    fn expanded_failure_shows_full_error_body() {
+        let block =
+            ReadToolCallBlock::new("gone.rs").with_error("Permission denied: /secret/file");
+        let mut ctx = make_ctx();
+        ctx.mode = DisplayMode::Expanded;
+        let output = block.output(&ctx);
+        let all_text: String = output
+            .lines
+            .iter()
+            .map(|l| {
+                l.content
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_text.contains("Permission denied: /secret/file"),
+            "expanded failure should include full error, got '{all_text}'"
+        );
+        // Header must not duplicate the error as a suffix when expanded.
+        let header: String = output.lines[0]
+            .content
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(header, "Read gone.rs");
+    }
+
+    #[test]
+    fn expanded_failure_error_lines_are_selectable() {
+        let err = "Error: /tmp/gone.rs does not exist.\nNote: your current working directory is /tmp";
+        let block = ReadToolCallBlock::new("/tmp/gone.rs").with_error(err);
+        let mut ctx = make_ctx();
+        ctx.mode = DisplayMode::Expanded;
+        let output = block.output(&ctx);
+
+        // Same range as the path header so a text drag can span both.
+        let header_range = output.lines[0].selection_range;
+        assert_eq!(header_range, Some(TOOL_HEADER_RANGE));
+
+        let selectable_body: Vec<&BlockLine> = output
+            .lines
+            .iter()
+            .skip(1)
+            .filter(|l| l.selection_range == header_range)
+            .collect();
+        assert!(
+            !selectable_body.is_empty(),
+            "error body must join the selection model for drag/copy"
+        );
+        assert!(
+            selectable_body
+                .iter()
+                .all(|l| !matches!(l.selectable, Selectable::None)),
+            "error body must not use non-selectable separators"
+        );
+        assert!(
+            selectable_body
+                .iter()
+                .all(|l| l.selection_range == Some(TOOL_HEADER_RANGE)),
+            "error body must share the header range so multi-line text drag works"
+        );
+        let body: String = selectable_body
+            .iter()
+            .map(|l| {
+                l.content
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("does not exist"),
+            "selectable body should carry the error text, got '{body}'"
+        );
+        assert!(
+            body.contains("current working directory"),
+            "multi-line error details should all be selectable, got '{body}'"
+        );
+    }
+
+    #[test]
+    fn expanded_failure_text_drag_copies_path_and_error() {
+        use crate::scrollback::text_selection::{
+            ActiveTextDrag, RangeHit, SelectionKind, reconstruct_full_selection_text,
+        };
+
+        let err = "Error: /tmp/gone.rs does not exist.";
+        let block = ReadToolCallBlock::new("/tmp/gone.rs").with_error(err);
+        let mut ctx = make_ctx();
+        ctx.mode = DisplayMode::Expanded;
+        let output = block.output(&ctx);
+
+        // Find first and last lines in the shared header range.
+        let range_lines: Vec<(usize, &BlockLine)> = output
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.selection_range == Some(TOOL_HEADER_RANGE))
+            .collect();
+        assert!(
+            range_lines.len() >= 2,
+            "need path + at least one error line, got {}",
+            range_lines.len()
+        );
+        let (first_idx, _) = range_lines[0];
+        let (last_idx, last_line) = range_lines[range_lines.len() - 1];
+        let last_width = crate::scrollback::types::selectable_cols(
+            &last_line.content,
+            &last_line.selectable,
+        )
+        .map(|c| c.end.saturating_sub(c.start))
+        .unwrap_or(1);
+
+        let drag = ActiveTextDrag {
+            anchor: RangeHit {
+                entry_idx: 0,
+                range_id: TOOL_HEADER_RANGE,
+                block_line_idx: first_idx,
+                col_within_range: 0,
+            },
+            head: RangeHit {
+                entry_idx: 0,
+                range_id: TOOL_HEADER_RANGE,
+                block_line_idx: last_idx,
+                col_within_range: last_width.saturating_sub(1),
+            },
+            kind: SelectionKind::Linear,
+            anchor_content_width: Some(80),
+        };
+        let copied = reconstruct_full_selection_text(&output.lines, &drag)
+            .expect("multi-line failure selection should reconstruct");
+        assert!(
+            copied.contains("gone.rs"),
+            "should include path, got {copied:?}"
+        );
+        assert!(
+            copied.contains("does not exist"),
+            "should include error body, got {copied:?}"
+        );
+    }
+
+    #[test]
+    fn copy_text_prefers_content_then_error() {
+        let with_content = ReadToolCallBlock::new("f.rs").with_content("hello".into(), 1);
+        assert_eq!(with_content.copy_text().as_deref(), Some("hello"));
+
+        let with_error = ReadToolCallBlock::new("gone.rs").with_error("no such file");
+        assert_eq!(with_error.copy_text().as_deref(), Some("no such file"));
+
+        let empty = ReadToolCallBlock::new("f.rs");
+        assert_eq!(empty.copy_text(), None);
+    }
+
+    #[test]
     fn fold_cycles_collapsed_truncated() {
         let block = ReadToolCallBlock::new("f.rs").with_content("a\nb\nc".into(), 3);
         assert_eq!(
@@ -695,6 +1010,19 @@ mod tests {
         );
         assert_eq!(
             block.next_fold_mode(DisplayMode::Truncated, false),
+            DisplayMode::Collapsed
+        );
+    }
+
+    #[test]
+    fn failed_fold_cycles_collapsed_expanded() {
+        let block = ReadToolCallBlock::new("gone.rs").with_error("no such file");
+        assert_eq!(
+            block.next_fold_mode(DisplayMode::Collapsed, false),
+            DisplayMode::Expanded
+        );
+        assert_eq!(
+            block.next_fold_mode(DisplayMode::Expanded, false),
             DisplayMode::Collapsed
         );
     }

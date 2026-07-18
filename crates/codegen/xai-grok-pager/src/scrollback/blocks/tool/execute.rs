@@ -118,14 +118,15 @@ impl ExecuteToolCallBlock {
         }
     }
 
-    /// Get copyable text for this block (stdout output).
+    /// Get copyable text for this block (stdout, or error when no stdout).
     ///
-    /// Returns the output string if available, or empty string if no output.
+    /// Returns the output string if available, the error message when the
+    /// tool failed without output, or an empty string otherwise.
     pub fn copy_text(&self) -> String {
-        self.output
-            .as_deref()
-            .map(crate::render::terminal_output::render_terminal_plain)
-            .unwrap_or_default()
+        if let Some(output) = self.output.as_deref() {
+            return crate::render::terminal_output::render_terminal_plain(output);
+        }
+        self.error.clone().unwrap_or_default()
     }
 
     /// Display form of the command for the header (may peel `cd &&` prefix).
@@ -537,13 +538,15 @@ impl ExecuteToolCallBlock {
             && let Some(error) = &self.error
             && !error.is_empty()
         {
+            // Blank gap is decoration. Error body shares the header range so
+            // text drag can span the command and the failure details.
             lines.push(BlockLine::separator(Line::from("")));
             let error_style = ratatui::style::Style::default().fg(theme.accent_error);
             for line in error.lines() {
-                lines.push(BlockLine::separator(Line::from(Span::styled(
-                    line.to_string(),
-                    error_style,
-                ))));
+                lines.push(
+                    BlockLine::styled(Line::from(Span::styled(line.to_string(), error_style)))
+                        .with_selection_range(Some(TOOL_HEADER_RANGE)),
+                );
             }
         }
 

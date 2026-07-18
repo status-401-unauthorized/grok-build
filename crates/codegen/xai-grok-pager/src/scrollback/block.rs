@@ -1087,7 +1087,7 @@ impl RenderBlock {
             RenderBlock::AgentMessage(b) => Some(b.copy_text(raw)),
             RenderBlock::Thinking(b) => Some(b.copy_text(raw)),
             RenderBlock::ToolCall(ToolCallBlock::Execute(b)) => Some(b.copy_text()),
-            RenderBlock::ToolCall(ToolCallBlock::Read(b)) => b.content.clone(),
+            RenderBlock::ToolCall(ToolCallBlock::Read(b)) => b.copy_text(),
             RenderBlock::ToolCall(ToolCallBlock::Edit(b)) => Some(b.copy_text()),
             RenderBlock::ToolCall(ToolCallBlock::WebFetch(b)) => Some(b.copy_text()),
             RenderBlock::ToolCall(ToolCallBlock::WebSearch(b)) => Some(b.copy_text()),
@@ -1415,6 +1415,38 @@ mod tests {
             plain_text_from_output(&output, &SelectionBoundaries::default()).as_deref(),
             Some("body")
         );
+    }
+
+    #[test]
+    fn failed_read_block_drag_copy_includes_error_details() {
+        let err = "Error: /tmp/gone.rs does not exist.\nNote: cwd is /tmp";
+        let block = RenderBlock::ToolCall(ToolCallBlock::Read(
+            ReadToolCallBlock::new("/tmp/gone.rs").with_error(err),
+        ));
+        let copied = block
+            .copy_visible_text_in_state(&ctx(DisplayMode::Expanded, false))
+            .expect("failed read should copy something");
+        assert!(
+            copied.contains("gone.rs"),
+            "path from header should be included, got {copied:?}"
+        );
+        assert!(
+            copied.contains("does not exist"),
+            "error body must be included in whole-block copy, got {copied:?}"
+        );
+        assert!(
+            copied.contains("cwd is /tmp"),
+            "multi-line error details must be included, got {copied:?}"
+        );
+    }
+
+    #[test]
+    fn failed_read_copy_text_returns_error() {
+        let err = "Error: /tmp/gone.rs does not exist.";
+        let block = RenderBlock::ToolCall(ToolCallBlock::Read(
+            ReadToolCallBlock::new("/tmp/gone.rs").with_error(err),
+        ));
+        assert_eq!(block.copy_text(false).as_deref(), Some(err));
     }
 
     #[test]

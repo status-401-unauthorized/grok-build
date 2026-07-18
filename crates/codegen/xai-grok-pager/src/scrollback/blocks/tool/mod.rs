@@ -48,6 +48,197 @@ use std::fmt;
 /// using one id across tool kinds keeps multi-line drag/copy grouping simple.
 pub(crate) const TOOL_HEADER_RANGE: u16 = 0;
 
+/// Collapsed-header error suffix (e.g. `" — does not exist"`, `" — Permission denied"`).
+///
+/// Failed tool rows stay collapsed by default and were previously red-bullet
+/// only; this puts a short reason on the header so the user can see *why*
+/// without expanding. Full paths are stripped from the reason — the tool
+/// header already paints the target (basename when collapsed), and the full
+/// message (often including absolute paths) lives in the expanded body.
+/// Multi-line bodies and long messages are truncated to `max_chars`
+/// (display columns approximated by Unicode scalar count).
+pub(crate) fn collapsed_error_suffix(error: &str, max_chars: usize) -> String {
+    // Prefer the first non-empty line so multi-line tool errors that start
+    // with blank chrome still produce a useful one-line suffix.
+    let first = error
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        return String::new();
+    }
+    let cleaned = first
+        .strip_prefix("Error: ")
+        .or_else(|| first.strip_prefix("error: "))
+        .unwrap_or(first)
+        .trim();
+    if cleaned.is_empty() {
+        return String::new();
+    }
+    let reason = short_collapsed_error_reason(cleaned);
+    if reason.is_empty() {
+        return String::new();
+    }
+    let max = max_chars.max(8);
+    let display: String = if reason.chars().count() <= max {
+        reason
+    } else {
+        let mut s: String = reason.chars().take(max.saturating_sub(1)).collect();
+        s.push('\u{2026}');
+        s
+    };
+    format!(" — {display}")
+}
+
+/// Whether `token` looks like a filesystem path rather than prose.
+fn looks_like_path_token(token: &str) -> bool {
+    let t = token.trim_end_matches(['.', ',', ';', '!', '?', ')', ']']);
+    if t.is_empty() {
+        return false;
+    }
+    // Absolute / home / relative path prefixes.
+    if t.starts_with('/')
+        || t.starts_with("~/")
+        || t.starts_with("./")
+        || t.starts_with("../")
+        || t == "~"
+        || t == "."
+        || t == ".."
+    {
+        return true;
+    }
+    // Windows drive path: `C:\...` or `C:/...`
+    let bytes = t.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    // Nested relative path with a separator (e.g. `src/gone.rs`, `.claude/skills`).
+    t.contains('/') || t.contains('\\')
+}
+
+/// Drop path-like tokens from a single-line error so the collapsed header
+/// shows only the reason. The header already displays the tool target path.
+fn short_collapsed_error_reason(cleaned: &str) -> String {
+    let mut s = cleaned.trim().to_string();
+    if s.is_empty() {
+        return s;
+    }
+
+    // Leading path: "{path} does not exist." / "{path} is a directory, not a file."
+    if let Some((first, rest)) = s.split_once(char::is_whitespace) {
+        if looks_like_path_token(first) {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                s = rest.to_string();
+            }
+        }
+    }
+
+    // Trailing ": {path}" (e.g. "Directory does not exist: /tmp/x",
+    // "Permission denied: /etc/shadow").
+    if let Some((reason, tail)) = s.rsplit_once(": ") {
+        let tail = tail.trim();
+        if looks_like_path_token(tail) {
+            let reason = reason.trim();
+            if !reason.is_empty() {
+                s = reason.to_string();
+            }
+        }
+    }
+
+    // Trailing path token: "permission denied reading /secret/file."
+    if let Some((rest, last)) = s.rsplit_once(char::is_whitespace) {
+        let last = last.trim();
+        if looks_like_path_token(last) {
+            let rest = rest.trim_end_matches(['.', ',', ';', ':', ' ']).trim();
+            if !rest.is_empty() {
+                s = rest.to_string();
+            }
+        }
+    }
+
+    // Normalize a trailing period left after path stripping.
+    let s = s.trim().trim_end_matches('.').trim().to_string();
+    s
+}
+
+#[cfg(test)]
+mod collapsed_error_suffix_tests {
+    use super::collapsed_error_suffix;
+
+    #[test]
+    fn strips_error_prefix_and_truncates() {
+        assert_eq!(
+            collapsed_error_suffix("Error: File not found", 48),
+            " — File not found"
+        );
+        let long = "x".repeat(80);
+        let out = collapsed_error_suffix(&long, 10);
+        assert!(out.starts_with(" — "));
+        assert!(out.ends_with('\u{2026}'));
+        // " — " (3) + 9 chars + ellipsis
+        assert_eq!(out.chars().count(), 3 + 9 + 1);
+    }
+
+    #[test]
+    fn empty_error_yields_empty_suffix() {
+        assert_eq!(collapsed_error_suffix("", 40), "");
+        assert_eq!(collapsed_error_suffix("   \nnext", 40), " — next");
+    }
+
+    #[test]
+    fn strips_leading_path_from_does_not_exist() {
+        assert_eq!(
+            collapsed_error_suffix(
+                "Error: /home/tporadowski/grok-tests/grok-build/missing.txt does not exist.",
+                48
+            ),
+            " — does not exist"
+        );
+        assert_eq!(
+            collapsed_error_suffix("Error: src/gone.rs does not exist.", 48),
+            " — does not exist"
+        );
+    }
+
+    #[test]
+    fn strips_trailing_path_after_colon() {
+        assert_eq!(
+            collapsed_error_suffix("Error: Directory does not exist: .claude/skills", 48),
+            " — Directory does not exist"
+        );
+        assert_eq!(
+            collapsed_error_suffix("Permission denied: /etc/shadow", 48),
+            " — Permission denied"
+        );
+    }
+
+    #[test]
+    fn strips_trailing_path_token() {
+        assert_eq!(
+            collapsed_error_suffix("Error: permission denied reading /secret/file.", 48),
+            " — permission denied reading"
+        );
+    }
+
+    #[test]
+    fn keeps_non_path_reasons() {
+        assert_eq!(
+            collapsed_error_suffix("Error: File not found", 48),
+            " — File not found"
+        );
+        assert_eq!(
+            collapsed_error_suffix("Error: binary file cannot be displayed as text", 48),
+            " — binary file cannot be displayed as text"
+        );
+    }
+}
+
 /// 1-based inclusive line range for display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineRange {

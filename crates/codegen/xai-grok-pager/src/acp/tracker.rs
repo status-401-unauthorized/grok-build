@@ -25,7 +25,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::debug;
-use xai_grok_tools::types::output::{BashOutput, ToolOutput};
+use xai_grok_tools::types::output::{BashOutput, ListDirOutput, ToolOutput};
 use xai_grok_tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
 use xai_grok_tools::util::strip_redundant_session_cd;
 /// Convert a UTC millisecond timestamp to local time.
@@ -1846,11 +1846,29 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
         _ if extract_raw_field(tc, "target_directory").is_some() => {
             let path = extract_raw_field(tc, "target_directory").unwrap();
             let mut block = ListDirToolCallBlock::new(make_relative_path(&path));
-            if let Some(content) = extract_listdir_content(&tc.raw_output) {
-                block = block.with_output(content);
-            }
-            if !success {
-                block = block.with_error("List directory failed");
+            if let Some(ref raw) = tc.raw_output
+                && let Ok(ToolOutput::ListDir(list_output)) =
+                    serde_json::from_value::<ToolOutput>(raw.clone())
+            {
+                match list_output {
+                    ListDirOutput::Content(c) => {
+                        block = block.with_output(c.content);
+                    }
+                    ListDirOutput::NotFound(msg)
+                    | ListDirOutput::IsAFile(msg)
+                    | ListDirOutput::NotADirectory(msg)
+                    | ListDirOutput::PermissionDenied(msg)
+                    | ListDirOutput::Error(msg) => {
+                        block = block.with_error(msg);
+                    }
+                }
+            } else if !success {
+                let text = content_text(tc);
+                block = block.with_error(if text.is_empty() {
+                    "List directory failed".to_string()
+                } else {
+                    text
+                });
             }
             RenderBlock::ToolCall(ToolCallBlock::ListDir(block))
         }
@@ -2380,16 +2398,7 @@ fn parse_file_paths_from_stdout(stdout: &str) -> Vec<String> {
         .map(make_relative_path)
         .collect()
 }
-/// Extract directory listing content from rawOutput.
-fn extract_listdir_content(raw: &Option<serde_json::Value>) -> Option<String> {
-    let val = raw.as_ref()?;
-    match serde_json::from_value::<ToolOutput>(val.clone()) {
-        Ok(ToolOutput::ListDir(xai_grok_tools::types::output::ListDirOutput::Content(c))) => {
-            Some(c.content)
-        }
-        _ => None,
-    }
-}
+
 /// Extract the agent's advertised toolset from
 /// `AvailableCommandsUpdate.meta`.
 ///
@@ -6492,6 +6501,57 @@ mod tests {
             "uploaded_url-only media must not claim a local open path"
         );
     }
+    #[test]
+    fn list_dir_failure_surfaces_typed_error_not_generic() {
+        let msg = "Error: Directory does not exist: /proj/.claude/skills";
+        let output = ToolOutput::ListDir(ListDirOutput::NotFound(msg.to_string()));
+        let tc = acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("list-missing")),
+            "list_dir",
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Failed)
+        .content(vec![])
+        .raw_input(Some(serde_json::json!({
+            "target_directory": "/proj/.claude/skills"
+        })))
+        .raw_output(serde_json::to_value(output).ok())
+        .locations(vec![]);
+        let RenderBlock::ToolCall(ToolCallBlock::ListDir(block)) =
+            tool_call_to_block(&tc, Some(Path::new("/proj")))
+        else {
+            panic!("expected ListDir block");
+        };
+        assert_eq!(block.error.as_deref(), Some(msg));
+        assert!(
+            block.path.contains(".claude/skills"),
+            "relative path should be preserved, got {}",
+            block.path
+        );
+        assert!(block.output.is_empty());
+    }
+
+    #[test]
+    fn read_file_failure_surfaces_typed_error() {
+        let msg = "Permission denied: /etc/shadow";
+        let output = ToolOutput::ReadFile(ReadFileOutput::PermissionDenied(msg.to_string()));
+        let tc = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("read-denied")), "read_file")
+            .kind(acp::ToolKind::Read)
+            .status(acp::ToolCallStatus::Failed)
+            .content(vec![])
+            .raw_input(Some(serde_json::json!({
+                "target_file": "/etc/shadow"
+            })))
+            .raw_output(serde_json::to_value(output).ok())
+            .locations(vec![]);
+        let RenderBlock::ToolCall(ToolCallBlock::Read(block)) = tool_call_to_block(&tc, None)
+        else {
+            panic!("expected Read block");
+        };
+        assert_eq!(block.error.as_deref(), Some(msg));
+        assert_eq!(block.path, "/etc/shadow");
+    }
+
     /// A tier-restricted (free / X Basic) imagine call short-circuits with the
     /// SuperGrok upsell as `ToolOutput::Text` on a `Completed` status. The media
     /// renderer has no file to open, so it must surface the upsell text in the

@@ -203,15 +203,27 @@ pub fn acp_tool_update(
             ))
         }
         ToolOutput::ListDir(list_dir_output) => {
-            let status = if matches!(list_dir_output, ListDirOutput::Content(_)) {
-                acp::ToolCallStatus::Completed
-            } else {
-                acp::ToolCallStatus::Failed
+            // Mirror ReadFile failures: put the concrete reason in content so
+            // clients that don't parse raw_output still surface why the list
+            // failed (not found, permission, not a directory, …).
+            let (status, content) = match list_dir_output {
+                ListDirOutput::Content(_) => (acp::ToolCallStatus::Completed, None),
+                ListDirOutput::NotFound(msg)
+                | ListDirOutput::IsAFile(msg)
+                | ListDirOutput::NotADirectory(msg)
+                | ListDirOutput::PermissionDenied(msg)
+                | ListDirOutput::Error(msg) => {
+                    let content = Some(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                        acp::TextContent::new(msg.clone()),
+                    ))]);
+                    (acp::ToolCallStatus::Failed, content)
+                }
             };
             Some(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from(tool_call_id)),
                 acp::ToolCallUpdateFields::new()
                     .status(Some(status))
+                    .content(content)
                     .raw_output(raw_output_json(output, rewriter)),
             ))
         }
@@ -846,6 +858,27 @@ mod tests {
         let update = acp_tool_update(&output, "call-1", None, None).unwrap();
         assert_eq!(update.fields.status, Some(acp::ToolCallStatus::Failed));
         assert!(update.fields.content.is_some());
+    }
+
+    #[test]
+    fn test_acp_tool_update_list_dir_not_found_includes_error_content() {
+        let msg = "Error: Directory does not exist: /tmp/missing";
+        let output = ToolOutput::ListDir(ListDirOutput::NotFound(msg.to_string()));
+        let update = acp_tool_update(&output, "list-1", None, None).unwrap();
+        assert_eq!(update.fields.status, Some(acp::ToolCallStatus::Failed));
+        let content = update.fields.content.expect("error content");
+        let text = content
+            .iter()
+            .find_map(|c| match c {
+                acp::ToolCallContent::Content(acp::Content {
+                    content: acp::ContentBlock::Text(t),
+                    ..
+                }) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .expect("text content block");
+        assert_eq!(text, msg);
+        assert!(update.fields.raw_output.is_some());
     }
 
     #[test]
