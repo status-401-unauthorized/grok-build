@@ -100,10 +100,11 @@ impl ListDirToolCallBlock {
         self.output = output.into();
     }
 
-    /// Render collapsed line: `List path` (plus a short error suffix on failure).
+    /// Render collapsed line: `List path` with either entry count (success)
+    /// or a short error suffix (failure).
     ///
     /// When `width` is provided, the path is fish-shortened to fit alongside
-    /// any error suffix.
+    /// any suffix.
     fn collapsed_line(&self, theme: &Theme, muted: bool, width: Option<usize>) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
@@ -128,8 +129,29 @@ impl ListDirToolCallBlock {
             .as_ref()
             .map(|e| collapsed_error_suffix(e, 48))
             .unwrap_or_default();
+
+        // Success path: optional "(N entries)" suffix when it fits.
+        let entry_count = self.output.lines().filter(|l| !l.trim().is_empty()).count();
+        let count_suffix = if self.error.is_none() && entry_count > 0 {
+            let s = if entry_count == 1 { "y" } else { "ies" };
+            format!(" ({entry_count} entr{s})")
+        } else {
+            String::new()
+        };
+        let count_fits = width.is_none_or(|w| prefix.len() + count_suffix.len() < w);
+        let effective_count = if count_fits {
+            count_suffix.as_str()
+        } else {
+            ""
+        };
+
+        let suffix_len = if !error_suffix.is_empty() {
+            error_suffix.len()
+        } else {
+            effective_count.len()
+        };
         let path_budget = width
-            .map(|w| w.saturating_sub(prefix.len() + error_suffix.len()))
+            .map(|w| w.saturating_sub(prefix.len()).saturating_sub(suffix_len))
             .unwrap_or(usize::MAX);
         let path = crate::render::tool_paths::shorten_path(&self.path, path_budget);
 
@@ -139,6 +161,8 @@ impl ListDirToolCallBlock {
         ];
         if !error_suffix.is_empty() {
             spans.push(Span::styled(error_suffix, error_style));
+        } else if !effective_count.is_empty() {
+            spans.push(Span::styled(effective_count.to_string(), theme.muted()));
         }
         Line::from(spans)
     }
@@ -284,6 +308,21 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_header_shows_entry_count() {
+        let block = ListDirToolCallBlock::new("src").with_output("a.rs\nb.rs\nsub/\n");
+        assert_eq!(header_text(&block, &make_ctx()), "List src (3 entries)");
+
+        let single = ListDirToolCallBlock::new("src").with_output("lonely.rs\n");
+        assert_eq!(header_text(&single, &make_ctx()), "List src (1 entry)");
+    }
+
+    #[test]
+    fn collapsed_header_omits_count_when_empty() {
+        let empty = ListDirToolCallBlock::new("src");
+        assert_eq!(header_text(&empty, &make_ctx()), "List src");
+    }
+
+    #[test]
     fn collapsed_failure_shows_path_and_error_reason() {
         let block = ListDirToolCallBlock::new(".claude/skills")
             .with_error("Error: Directory does not exist: .claude/skills");
@@ -292,6 +331,17 @@ mod tests {
             text, "List .claude/skills — Directory does not exist",
             "path once in tool target; reason without path suffix, got '{text}'"
         );
+    }
+
+    #[test]
+    fn collapsed_failure_omits_entry_count() {
+        // Failures show an error suffix, never a success entry count.
+        let failed = ListDirToolCallBlock::new("gone")
+            .with_output("stale\n")
+            .with_error("no such directory");
+        let text = header_text(&failed, &make_ctx());
+        assert_eq!(text, "List gone — no such directory");
+        assert!(!text.contains("entr"));
     }
 
     #[test]
