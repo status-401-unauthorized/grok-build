@@ -60,7 +60,13 @@ build**; do **not** `git push` without explicit user approval.
 
 ### 1. Fetch upstream
 
+Record the pre-fetch upstream tip so later steps can isolate **what this sync
+actually brought in** (not “fork tree vs origin tree”):
+
 ```bash
+OLD_ORIGIN=$(git rev-parse origin/main 2>/dev/null || true)
+echo "OLD_ORIGIN=${OLD_ORIGIN:-unset}"
+
 git fetch origin main
 # Optional but useful for comparison:
 git fetch fork main
@@ -82,6 +88,8 @@ Ensure on the integration branch (default `main`):
 
 ```bash
 git checkout main
+PRE_MERGE_HEAD=$(git rev-parse HEAD)
+echo "PRE_MERGE_HEAD=$PRE_MERGE_HEAD"
 git merge origin/main
 ```
 
@@ -162,11 +170,21 @@ crates/codegen/xai-grok-pager/src/scrollback/blocks/tool/
 crates/codegen/xai-grok-pager/src/acp/tracker.rs
 ```
 
-How to check:
+How to check (use the **upstream-only** commit range — not
+`PRE_MERGE_HEAD..origin/main`):
+
+`PRE_MERGE_HEAD..origin/main` is a tree comparison. When the fork already
+diverges in `tool/*` or `tracker.rs`, those paths show up as “changed” even
+if upstream never touched them this sync. Always diff the commits that landed
+on origin:
 
 ```bash
+# Prefer OLD_ORIGIN recorded in Step 1 (pre-fetch origin/main tip).
+# Fallback: merge-base of pre-merge HEAD and post-fetch origin/main.
+UPSTREAM_BASE="${OLD_ORIGIN:-$(git merge-base PRE_MERGE_HEAD origin/main)}"
+
 # Did this upstream sync touch selection/copy-adjacent code?
-git diff --name-only PRE_MERGE_HEAD..origin/main -- \
+git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
   crates/codegen/xai-grok-pager-render/src/clipboard/ \
   crates/codegen/xai-grok-pager/src/scrollback/ \
   crates/codegen/xai-grok-pager/src/acp/
@@ -359,9 +377,12 @@ Summarize for the user:
 
 ```bash
 # Full happy path (agent expands conflict/analysis + skill review as needed)
+OLD_ORIGIN=$(git rev-parse origin/main)
 git fetch origin main
 git checkout main
+PRE_MERGE_HEAD=$(git rev-parse HEAD)
 git merge origin/main   # resolve + analyze if needed
+# Adjacent re-check: git diff --name-only $OLD_ORIGIN..origin/main -- <watch paths>
 cargo build -p xai-grok-pager-bin
 grok-local version      # or HERDR_AGENT=grok ./target/debug/xai-grok-pager version
 # then: re-read this SKILL.md → report skill-review suggestions (or none)
