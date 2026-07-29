@@ -153,15 +153,26 @@ Outcomes per delta:
 - **Adapt** — upstream moved; port fork intent onto new structure (Step 5).
 - **Drop** — upstream fully supersedes; document why.
 
-Known historical fork theme (update if superseded): pager tool-error UI —
-copyable tool errors, hide paths in collapsed headers. Treat as high-priority
-intent unless analysis shows upstream absorbed it.
+Known historical fork themes (update if superseded) — treat as high-priority
+intent unless analysis shows upstream absorbed them:
+
+1. **Pager tool-error UI** — copyable tool errors, hide paths in collapsed
+   headers. Primary paths: `scrollback/blocks/tool/*`, `scrollback/block.rs`,
+   `acp/tracker.rs`.
+2. **Plugin hooks at spawn** — merge enabled+trusted plugin hooks into the
+   session `HookRegistry` at session start (not only on mid-session
+   ReloadHooks / ReloadPlugins). Primary path:
+   `crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs`
+   (look for `append_specs` / “merged plugin hooks into session registry at
+   spawn”). Upstream still wires plugin hooks mainly on reload; preserve the
+   spawn-time merge unless origin lands an equivalent.
 
 **Adjacent re-check (even with a clean merge / no fork-file conflicts):**
-if the upstream range touches clipboard delivery, text selection, or tool-block
-render/copy paths, re-verify that fork intent still holds — selection ranges
-and copyable failure bodies can break without a Git conflict on the fork
-files themselves. Watch at least:
+fork intent can break without a Git conflict on the fork files themselves.
+
+**Pager tool-error UI** — if the upstream range touches clipboard delivery,
+text selection, or tool-block render/copy paths, re-verify selection ranges
+and copyable failure bodies. Watch at least:
 
 ```text
 crates/codegen/xai-grok-pager-render/src/clipboard/
@@ -170,13 +181,28 @@ crates/codegen/xai-grok-pager/src/scrollback/blocks/tool/
 crates/codegen/xai-grok-pager/src/acp/tracker.rs
 ```
 
+**Plugin hooks at spawn** — if the upstream range touches session spawn,
+hook reload, or plugin registry snapshot application, re-verify the
+spawn-time plugin `append_specs` path still exists after merge. Watch at
+least:
+
+```text
+crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs
+```
+
+Also skim related reload/snapshot helpers when they appear in the upstream
+diff (e.g. `reload_hooks_impl`, `apply_plugin_registry_snapshot`, or other
+`acp_session_impl/*` hook/plugin wiring). Confirm post-merge working tree
+still merges plugin file + inline hooks into `built_hook_registry` before
+the session actor starts.
+
 How to check (use the **upstream-only** commit range — not
 `PRE_MERGE_HEAD..origin/main`):
 
 `PRE_MERGE_HEAD..origin/main` is a tree comparison. When the fork already
-diverges in `tool/*` or `tracker.rs`, those paths show up as “changed” even
-if upstream never touched them this sync. Always diff the commits that landed
-on origin:
+diverges in `tool/*`, `tracker.rs`, or `spawn.rs`, those paths show up as
+“changed” even if upstream never touched them this sync. Always diff the
+commits that landed on origin:
 
 ```bash
 # Prefer OLD_ORIGIN recorded in Step 1 (pre-fetch origin/main tip).
@@ -188,14 +214,25 @@ git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
   crates/codegen/xai-grok-pager-render/src/clipboard/ \
   crates/codegen/xai-grok-pager/src/scrollback/ \
   crates/codegen/xai-grok-pager/src/acp/
+
+# Did this upstream sync touch session spawn / plugin-hook wiring?
+git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
+  crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs \
+  crates/codegen/xai-grok-shell/src/session/acp_session_impl/
 ```
 
-If any of those paths appear, skim the upstream diff for selection ranges,
+If any pager watch paths appear, skim the upstream diff for selection ranges,
 `CopyDelivery` / toast wiring, and tool failure body handling; confirm
 collapsed error suffixes and copyable error text still work (read call sites
-or run focused tool-block / selection tests when practical). Note the outcome
-in the fork-analysis section of the completion report (“adjacent re-check:
-pass / adapt needed”).
+or run focused tool-block / selection tests when practical).
+
+If `spawn.rs` (or related hook/plugin helpers) appear, skim the upstream
+diff and re-read the post-merge spawn hook-registry block; confirm plugin
+hooks are still appended at spawn (not only on reload).
+
+Note both outcomes in the fork-analysis section of the completion report
+(“adjacent re-check: pass / adapt needed” per theme, or “n/a — paths
+untouched”).
 
 ### 5. Implement post-analysis adjustments
 
@@ -322,8 +359,8 @@ next `/update-grok-local` stays accurate.
 | Remotes / branches | Remote names or tracking model changed |
 | Package / binary paths | `xai-grok-pager-bin`, artifact path, or `grok-local` wiring changed |
 | Version sources | Semver crate, `build.rs` embed, or channel labeling changed |
-| Fork themes | Upstream absorbed the error-UI delta, or a new deliberate fork theme appeared |
-| Adjacent watch paths | New surfaces matter for copy/selection/tool-error intent (clipboard, scrollback, ACP, …) |
+| Fork themes | Upstream absorbed error-UI or plugin-hooks-at-spawn, or a new deliberate fork theme appeared |
+| Adjacent watch paths | New surfaces matter for copy/selection/tool-error or plugin-hook spawn intent (clipboard, scrollback, ACP, `spawn.rs`, …) |
 | Build / verify procedure | Toolchain, timeouts, env vars (`HERDR_AGENT`, `GROK_VERSION`), or pass criteria wrong |
 | Safety / push policy | Process friction that should become an explicit rule |
 | Operational gaps | Something non-obvious burned time this run and belongs in the skill |
@@ -350,8 +387,9 @@ Summarize for the user:
 1. **Sync:** pre/post SHAs (`HEAD`, `origin/main`), commits merged count.
 2. **Conflicts:** files (or “none”), resolution summary.
 3. **Fork analysis:** each delta → keep / adapt / drop + one-line rationale;
-   include **adjacent re-check** result when upstream touched clipboard /
-   selection / tool-block paths (or “n/a — paths untouched”).
+   include **adjacent re-check** results when upstream touched clipboard /
+   selection / tool-block paths and/or session spawn / plugin-hook wiring
+   (or “n/a — paths untouched” per theme).
 4. **Code adjustments:** what was implemented after analysis (or “none”).
 5. **Build:** success/fail, package `xai-grok-pager-bin`, binary path + mtime.
 6. **Version check:** full `grok-local version` line vs expected `$EXPECTED ($SHORT)`.
@@ -382,7 +420,7 @@ git fetch origin main
 git checkout main
 PRE_MERGE_HEAD=$(git rev-parse HEAD)
 git merge origin/main   # resolve + analyze if needed
-# Adjacent re-check: git diff --name-only $OLD_ORIGIN..origin/main -- <watch paths>
+# Adjacent re-check (pager + spawn/plugin-hooks): git diff --name-only $OLD_ORIGIN..origin/main -- <watch paths>
 cargo build -p xai-grok-pager-bin
 grok-local version      # or HERDR_AGENT=grok ./target/debug/xai-grok-pager version
 # then: re-read this SKILL.md → report skill-review suggestions (or none)
