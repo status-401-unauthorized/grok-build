@@ -1233,7 +1233,9 @@ pub(crate) async fn spawn_session_actor(
         .to_owned();
     let allowed_subagent_types_for_handle = agent.definition().allowed_subagent_types.clone();
     let mut hook_discovery_errors: Vec<xai_grok_hooks::error::HookError> = Vec::new();
-    let built_hook_registry: Option<Arc<xai_grok_hooks::discovery::HookRegistry>> =
+    // Disk / agent / client hooks first (override path already includes disk when
+    // an agent frontmatter hooks block is present).
+    let mut built_hook_registry: Option<Arc<xai_grok_hooks::discovery::HookRegistry>> =
         if let Some(override_reg) = hook_registry_override {
             Some(override_reg)
         } else {
@@ -1260,6 +1262,55 @@ pub(crate) async fn spawn_session_actor(
                 Some(Arc::new(registry))
             }
         };
+    // Merge enabled+trusted plugin hooks at session start. Without this, plugin
+    // hooks only land on mid-session ReloadHooks / ReloadPlugins (reload_hooks_impl
+    // / apply_plugin_registry_snapshot), so SessionEnd/etc. never fire on a fresh
+    // session after `grok plugin install`.
+    if let Some(ref pr) = plugin_registry {
+        let mut plugin_specs = Vec::new();
+        for plugin in pr.active_plugins() {
+            if let Some(ref hooks_path) = plugin.hooks_path {
+                let (specs, warnings) =
+                    xai_grok_agent::plugins::hooks_adapter::parse_plugin_hooks(
+                        hooks_path,
+                        &plugin.name,
+                        &plugin.root_str(),
+                        &plugin.data_dir_str(),
+                    );
+                for w in &warnings {
+                    tracing::warn!("{w}");
+                }
+                plugin_specs.extend(specs);
+            }
+            if let Some(ref inline_value) = plugin.inline_hooks {
+                let (specs, warnings) =
+                    xai_grok_agent::plugins::hooks_adapter::parse_plugin_hooks_from_value(
+                        inline_value,
+                        &plugin.name,
+                        &plugin.root_str(),
+                        &plugin.data_dir_str(),
+                    );
+                for w in &warnings {
+                    tracing::warn!("{w}");
+                }
+                plugin_specs.extend(specs);
+            }
+        }
+        if !plugin_specs.is_empty() {
+            let plugin_hook_count = plugin_specs.len();
+            let mut base = built_hook_registry
+                .as_ref()
+                .map(|arc| (**arc).clone())
+                .unwrap_or_default();
+            base.append_specs(plugin_specs);
+            tracing::info!(
+                plugin_hook_count,
+                total_hook_count = base.len(),
+                "merged plugin hooks into session registry at spawn"
+            );
+            built_hook_registry = Some(Arc::new(base));
+        }
+    }
     let hook_registry_for_handle = built_hook_registry.clone();
     let workspace_ops_for_handle = workspace_ops.clone();
     #[allow(clippy::arc_with_non_send_sync)]
