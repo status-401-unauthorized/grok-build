@@ -242,6 +242,59 @@ impl UserPromptBlock {
         (prefix_style, text_style, skill_style)
     }
 
+    /// Whether this block should show the session turn index (matches
+    /// `/session-info` `Turn: N`). Plain user prompts only — bash, cron, and
+    /// mid-turn interjections are excluded (interjections never receive a
+    /// shell `prompt_index`).
+    fn shows_turn_index(&self) -> bool {
+        self.prompt_index.is_some()
+            && !self.is_interjection
+            && !self.is_bash
+            && !self.is_cron
+    }
+
+    /// Compact label for the 0-based session turn index, trailing space included
+    /// so it sits cleanly after the arrow / before body text.
+    fn turn_index_label(&self) -> Option<String> {
+        if !self.shows_turn_index() {
+            return None;
+        }
+        self.prompt_index.map(|n| format!("Turn {n} "))
+    }
+
+    /// First-line non-body prefix spans (arrow / bash / cron + optional turn
+    /// label) and their display width. Continuation lines indent by this width.
+    fn first_line_prefix(
+        &self,
+        show_prefix: bool,
+        prefix_style: Style,
+        turn_style: Style,
+    ) -> (Vec<Span<'static>>, usize) {
+        let mut spans = Vec::new();
+        let mut width = 0usize;
+
+        if show_prefix {
+            let base = if self.is_bash {
+                "$ "
+            } else if self.is_cron {
+                "\u{21BB}  "
+            } else {
+                crate::glyphs::prompt_arrow()
+            };
+            if !base.is_empty() {
+                width += base.width();
+                spans.push(Span::styled(base.to_string(), prefix_style));
+            }
+        }
+
+        if let Some(label) = self.turn_index_label() {
+            width += label.width();
+            spans.push(Span::styled(label, turn_style));
+        }
+
+        (spans, width)
+    }
+
     /// Wrap and style the prompt text, returning visual lines. When
     /// `max_lines` is set and content exceeds it, the last line is
     /// truncated with a " …" ellipsis.
@@ -256,6 +309,10 @@ impl UserPromptBlock {
         // Minimal mode engages this lock; read it here instead of app state.
         let terminal_native = crate::theme::cache::terminal_native_locked();
         let (prefix_style, text_style, skill_style) = Self::prompt_styles(&theme, terminal_native);
+        let mut turn_style = theme.fg(theme.gray);
+        if terminal_native {
+            turn_style = turn_style.add_modifier(Modifier::BOLD);
+        }
         let band = Self::prompt_band_color_for(&theme, is_selected, terminal_native);
         // Semantic line bg (not a "panel") so it survives minimal's flat_background.
         let with_band = |line: BlockLine| -> BlockLine {
@@ -265,17 +322,10 @@ impl UserPromptBlock {
             }
         };
 
-        let prefix = if !show_prefix {
-            ""
-        } else if self.is_bash {
-            "$ "
-        } else if self.is_cron {
-            "\u{21BB}  "
-        } else {
-            crate::glyphs::prompt_arrow()
-        };
-        let prefix_width = prefix.width();
-        let has_visible_prefix = prefix_width > 0;
+        let (prefix_spans, prefix_width) =
+            self.first_line_prefix(show_prefix, prefix_style, turn_style);
+        let prefix_span_count = prefix_spans.len();
+        let has_visible_prefix = prefix_span_count > 0;
         let ellipsis = " \u{2026}";
         let ellipsis_width = 2;
 
@@ -291,13 +341,14 @@ impl UserPromptBlock {
                 // Empty line - just show prefix/indent
                 let indent = " ".repeat(prefix_width);
                 let line = if logical_idx == 0 {
-                    Line::from(vec![Span::styled(prefix.to_string(), prefix_style)])
+                    Line::from(prefix_spans.clone())
                 } else {
                     Line::from(vec![Span::styled(indent, prefix_style)])
                 };
                 let block_line = with_band(BlockLine {
                     selectable: if has_visible_prefix {
-                        Selectable::Spans(1..1) // empty content range past prefix
+                        // Empty content range past all prefix spans.
+                        Selectable::Spans(prefix_span_count..prefix_span_count)
                     } else {
                         Selectable::All
                     },
@@ -357,7 +408,6 @@ impl UserPromptBlock {
             {
                 let is_first_line = logical_idx == 0 && wrap_idx == 0;
                 let indent: String = " ".repeat(prefix_width);
-                let line_prefix = if is_first_line { prefix } else { &indent };
 
                 // Check if this will be the last allowed line
                 let will_be_last = max_lines.is_some_and(|max| all_lines.len() + 1 == max);
@@ -375,6 +425,14 @@ impl UserPromptBlock {
                     wrap_joiner
                 };
 
+                // Prefix spans for this visual line.
+                let line_prefix_spans: Vec<Span<'static>> = if is_first_line {
+                    prefix_spans.clone()
+                } else {
+                    vec![Span::styled(indent.clone(), prefix_style)]
+                };
+                let line_prefix_span_count = line_prefix_spans.len();
+
                 if will_be_last && has_more {
                     // This is the last allowed line and there's more content.
                     // Re-wrap the current line's content with reduced width to
@@ -390,14 +448,14 @@ impl UserPromptBlock {
                         .unwrap_or_else(Line::default);
 
                     // Build final line with prefix, content, and ellipsis
-                    let mut spans = vec![Span::styled(line_prefix.to_string(), prefix_style)];
+                    let mut spans = line_prefix_spans;
                     spans.extend(final_content.spans.into_iter().map(|s| Span {
                         content: s.content.to_string().into(),
                         style: s.style,
                     }));
                     spans.push(Span::styled(ellipsis.to_string(), text_style));
 
-                    let content_start = if has_visible_prefix { 1 } else { 0 };
+                    let content_start = line_prefix_span_count;
                     let content_end = spans.len() - 1; // exclude ellipsis
                     let block_line = with_band(BlockLine {
                         content: Line::from(spans),
@@ -415,7 +473,7 @@ impl UserPromptBlock {
                 }
 
                 // Normal line (not truncated)
-                let mut spans = vec![Span::styled(line_prefix.to_string(), prefix_style)];
+                let mut spans = line_prefix_spans;
                 spans.extend(wrapped_line.spans.into_iter().map(|s| Span {
                     content: s.content.to_string().into(),
                     style: s.style,
@@ -424,7 +482,7 @@ impl UserPromptBlock {
                 let block_line = with_band(BlockLine {
                     content: Line::from(spans),
                     selectable: if has_visible_prefix {
-                        Selectable::Spans(1..content_end)
+                        Selectable::Spans(line_prefix_span_count..content_end)
                     } else {
                         Selectable::All
                     },
@@ -445,8 +503,15 @@ impl UserPromptBlock {
 
         // Handle empty text
         if all_lines.is_empty() {
+            // Prefer full prefix (arrow + turn); fall back to trimmed base if
+            // somehow empty (mirrors the pre-turn-label single-span path).
+            let content = if prefix_spans.is_empty() {
+                Line::from(Span::styled(String::new(), prefix_style))
+            } else {
+                Line::from(prefix_spans)
+            };
             all_lines.push(with_band(BlockLine {
-                content: Line::from(Span::styled(prefix.trim().to_string(), prefix_style)),
+                content,
                 selectable: Selectable::All,
                 selection_range: Some(USER_PROMPT_BODY_RANGE),
                 ..Default::default()
@@ -1160,6 +1225,81 @@ mod tests {
                 false,
                 crate::theme::cache::terminal_native_locked(),
             )
+        );
+    }
+
+    #[test]
+    fn turn_index_label_renders_after_arrow() {
+        let mut block = UserPromptBlock::new("hello");
+        block.prompt_index = Some(0);
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        assert_eq!(lines.len(), 1);
+        let text = line_text(&lines[0].content);
+        let expected = format!("{}Turn 0 hello", crate::glyphs::prompt_arrow());
+        assert_eq!(text, expected);
+
+        // Arrow + "Turn 0 " + body — body is not part of the prefix spans.
+        let spans = &lines[0].content.spans;
+        assert!(spans.len() >= 3);
+        assert_eq!(spans[0].content.as_ref(), crate::glyphs::prompt_arrow());
+        assert_eq!(spans[1].content.as_ref(), "Turn 0 ");
+        assert_eq!(spans[2].content.as_ref(), "hello");
+
+        let theme = Theme::current();
+        assert_eq!(spans[1].style.fg, Some(theme.gray));
+
+        // Selection starts after both prefix spans (arrow + turn label).
+        assert_eq!(lines[0].selectable, Selectable::Spans(2..3));
+    }
+
+    #[test]
+    fn turn_index_absent_means_no_label() {
+        let block = UserPromptBlock::new("hello");
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        let text = line_text(&lines[0].content);
+        assert_eq!(text, format!("{}hello", crate::glyphs::prompt_arrow()));
+        assert!(!text.contains("Turn "));
+    }
+
+    #[test]
+    fn interjection_never_shows_turn_index() {
+        let mut block = UserPromptBlock::interjection("mid-turn note");
+        block.prompt_index = Some(3); // should not happen in practice
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        let text = line_text(&lines[0].content);
+        assert!(
+            !text.contains("Turn "),
+            "interjections must not show turn labels: {text:?}"
+        );
+    }
+
+    #[test]
+    fn bash_and_cron_never_show_turn_index() {
+        let mut bash = UserPromptBlock::bash("ls");
+        bash.prompt_index = Some(1);
+        let text = line_text(&bash.wrap_prompt_lines(80, None, true, false)[0].content);
+        assert!(!text.contains("Turn "), "bash: {text:?}");
+
+        let mut cron = UserPromptBlock::cron("do the thing");
+        cron.prompt_index = Some(2);
+        let text = line_text(&cron.wrap_prompt_lines(80, None, true, false)[0].content);
+        assert!(!text.contains("Turn "), "cron: {text:?}");
+    }
+
+    #[test]
+    fn turn_index_widens_continuation_indent() {
+        let mut block = UserPromptBlock::new("line one\nline two");
+        block.prompt_index = Some(7);
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        assert_eq!(lines.len(), 2);
+        let first = line_text(&lines[0].content);
+        assert!(first.starts_with(&format!("{}Turn 7 ", crate::glyphs::prompt_arrow())));
+        // Continuation indent matches first-line prefix display width.
+        let prefix_w = format!("{}Turn 7 ", crate::glyphs::prompt_arrow()).width();
+        let cont = line_text(&lines[1].content);
+        assert!(
+            cont.starts_with(&" ".repeat(prefix_w)),
+            "continuation indent should match turn-labeled prefix width: {cont:?}"
         );
     }
 }

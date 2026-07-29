@@ -451,6 +451,32 @@ impl AgentView {
             reload.saw_todo_update = true;
         }
     }
+    /// 0-based index of the *next* plain user turn — same value `/session-info`
+    /// reports as `Turn: N` before the next submit.
+    ///
+    /// Prefer max shell-stamped `UserPromptBlock.prompt_index` (+1). If no
+    /// stamps yet (legacy resume, pre-echo), fall back to the count of
+    /// non-interjection user prompts (≈ next 0-based index after history).
+    pub fn next_session_turn_index(&self) -> usize {
+        use crate::scrollback::block::RenderBlock;
+        let mut max_pi: Option<usize> = None;
+        let mut plain_count = 0usize;
+        for i in 0..self.scrollback.len() {
+            if let Some(entry) = self.scrollback.entry(i)
+                && let RenderBlock::UserPrompt(ref block) = entry.block
+                && !block.is_interjection
+            {
+                plain_count = plain_count.saturating_add(1);
+                if let Some(pi) = block.prompt_index {
+                    max_pi = Some(max_pi.map_or(pi, |m| m.max(pi)));
+                }
+            }
+        }
+        max_pi
+            .map(|m| m.saturating_add(1))
+            .unwrap_or(plain_count)
+    }
+
     /// Start a locally-tracked turn: enter TurnRunning with the turn-scoped
     /// bookkeeping every real turn start must apply, so no caller can miss
     /// it. Deliberately NOT used by server-initiated synthetic turns

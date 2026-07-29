@@ -1275,9 +1275,9 @@ impl AcpUpdateTracker {
                         if block.is_interjection {
                             continue;
                         }
-                        if block.prompt_index.is_none() {
-                            block.prompt_index = Some(pi);
-                        }
+                        // Prefer shell-stamped index over any optimistic local
+                        // stamp so resume / multi-client stay authoritative.
+                        block.prompt_index = Some(pi);
                         break;
                     }
                 }

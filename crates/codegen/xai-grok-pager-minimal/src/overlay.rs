@@ -244,13 +244,20 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
     let id = *id;
     // Snapshot mode/multiline before the mut agent borrow so `prompt_style` can
     // still read `app.appearance` (same inputs as `draw_live`).
-    let (input_mode, multiline) = app
+    let (input_mode, multiline, turn_index) = app
         .agents
         .get(&id)
-        .map(|a| (a.prompt_input_mode, a.multiline_mode))
-        .unwrap_or_default();
+        .map(|a| {
+            (
+                a.prompt_input_mode,
+                a.multiline_mode,
+                Some(a.next_session_turn_index()),
+            )
+        })
+        .unwrap_or((Default::default(), false, None));
     let theme = xai_grok_pager::theme::Theme::current();
-    let style = super::live::prompt_style(&app.appearance, input_mode, &theme, multiline);
+    let style =
+        super::live::prompt_style(&app.appearance, input_mode, &theme, multiline, turn_index);
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return base;
@@ -803,6 +810,7 @@ fn inline_input_style(theme: &Theme) -> PromptStyle {
         accent_color_override: None,
         border_color_override: None,
         prefix_override: None,
+        turn_index: None,
         placeholder_override: None,
         show_accent_line: false,
         show_borders: false,

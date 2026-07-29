@@ -349,7 +349,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     paint_or_reuse_combined_user_bubbles(agent, &queued.combined_texts);
                 (first_idx, last_id, all_ids)
             } else {
-                let block = if is_skill {
+                let mut block = if is_skill {
                     RenderBlock::skill_prompt(&queued.text)
                 } else if !queued.skill_token_ranges.is_empty() {
                     RenderBlock::user_prompt_with_skill_tokens(
@@ -359,6 +359,15 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 } else {
                     RenderBlock::user_prompt(&queued.text)
                 };
+                // Optimistic session turn stamp so the bubble + composer show
+                // the same `/session-info` index before the shell echo arrives.
+                // Tracker only backfills when `prompt_index` is still None.
+                if let RenderBlock::UserPrompt(ref mut b) = block
+                    && !b.is_interjection
+                    && b.prompt_index.is_none()
+                {
+                    b.prompt_index = Some(agent.next_session_turn_index());
+                }
                 let id = agent.scrollback.push_block(block);
                 (agent.scrollback.len().saturating_sub(1), id, vec![id])
             };

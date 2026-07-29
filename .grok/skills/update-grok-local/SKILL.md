@@ -166,6 +166,20 @@ intent unless analysis shows upstream absorbed them:
    (look for `append_specs` / “merged plugin hooks into session registry at
    spawn”). Upstream still wires plugin hooks mainly on reload; preserve the
    spawn-time merge unless origin lands an equivalent.
+3. **Session turn index UI** — show the 0-based `/session-info` `Turn: N`
+   index on (a) plain user-prompt **scrollback bubbles** and (b) the
+   **composer** input prefix (`❯ Turn N …`). Plain prompts only (not bash,
+   cron, or interjections). Key pieces:
+   - Bubble render: `scrollback/blocks/user.rs` (`prompt_index` → `Turn {n} `)
+   - Optimistic stamp on local drain: `app/dispatch/queue.rs`
+   - Shell stamp preferred on echo: `acp/tracker.rs` (always apply
+     `promptIndex` meta, not only when `None`)
+   - Next index for composer: `AgentView::next_session_turn_index` in
+     `app/agent_view/session.rs` (max stamped `prompt_index` + 1, else plain
+     user-prompt count)
+   - Composer style/render: `views/prompt_widget/mod.rs` (`PromptStyle.turn_index`)
+   - Full TUI wiring: `app/agent_view/render.rs`
+   - Minimal mode wiring: `xai-grok-pager-minimal` `live.rs` / `overlay.rs`
 
 **Adjacent re-check (even with a clean merge / no fork-file conflicts):**
 fork intent can break without a Git conflict on the fork files themselves.
@@ -196,13 +210,33 @@ diff (e.g. `reload_hooks_impl`, `apply_plugin_registry_snapshot`, or other
 still merges plugin file + inline hooks into `built_hook_registry` before
 the session actor starts.
 
+**Session turn index UI** — if the upstream range touches user-prompt
+render, prompt_index stamping, queue drain paint, composer prefix layout,
+or minimal live prompt style, re-verify both surfaces still show the
+0-based session turn. Watch at least:
+
+```text
+crates/codegen/xai-grok-pager/src/scrollback/blocks/user.rs
+crates/codegen/xai-grok-pager/src/views/prompt_widget/mod.rs
+crates/codegen/xai-grok-pager/src/app/agent_view/session.rs
+crates/codegen/xai-grok-pager/src/app/agent_view/render.rs
+crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs
+crates/codegen/xai-grok-pager/src/acp/tracker.rs
+crates/codegen/xai-grok-pager-minimal/src/live.rs
+```
+
+Confirm post-merge: plain bubbles render `Turn {n}` when `prompt_index` is
+set; composer shows next index via `PromptStyle.turn_index` +
+`next_session_turn_index()`; bash/cron/interjections stay unlabeled;
+minimal `prompt_style(..., turn_index)` still wired.
+
 How to check (use the **upstream-only** commit range — not
 `PRE_MERGE_HEAD..origin/main`):
 
 `PRE_MERGE_HEAD..origin/main` is a tree comparison. When the fork already
-diverges in `tool/*`, `tracker.rs`, or `spawn.rs`, those paths show up as
-“changed” even if upstream never touched them this sync. Always diff the
-commits that landed on origin:
+diverges in `tool/*`, `tracker.rs`, `spawn.rs`, or turn-index UI paths,
+those paths show up as “changed” even if upstream never touched them this
+sync. Always diff the commits that landed on origin:
 
 ```bash
 # Prefer OLD_ORIGIN recorded in Step 1 (pre-fetch origin/main tip).
@@ -219,6 +253,14 @@ git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
 git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
   crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs \
   crates/codegen/xai-grok-shell/src/session/acp_session_impl/
+
+# Did this upstream sync touch turn-index UI (bubble + composer)?
+git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
+  crates/codegen/xai-grok-pager/src/scrollback/blocks/user.rs \
+  crates/codegen/xai-grok-pager/src/views/prompt_widget/ \
+  crates/codegen/xai-grok-pager/src/app/agent_view/ \
+  crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs \
+  crates/codegen/xai-grok-pager-minimal/src/
 ```
 
 If any pager watch paths appear, skim the upstream diff for selection ranges,
@@ -230,7 +272,11 @@ If `spawn.rs` (or related hook/plugin helpers) appear, skim the upstream
 diff and re-read the post-merge spawn hook-registry block; confirm plugin
 hooks are still appended at spawn (not only on reload).
 
-Note both outcomes in the fork-analysis section of the completion report
+If turn-index paths appear, re-read bubble + composer wiring; confirm
+`Turn {n}` still shows on plain prompts and the composer next-index still
+matches `/session-info` semantics.
+
+Note outcomes in the fork-analysis section of the completion report
 (“adjacent re-check: pass / adapt needed” per theme, or “n/a — paths
 untouched”).
 
@@ -359,8 +405,8 @@ next `/update-grok-local` stays accurate.
 | Remotes / branches | Remote names or tracking model changed |
 | Package / binary paths | `xai-grok-pager-bin`, artifact path, or `grok-local` wiring changed |
 | Version sources | Semver crate, `build.rs` embed, or channel labeling changed |
-| Fork themes | Upstream absorbed error-UI or plugin-hooks-at-spawn, or a new deliberate fork theme appeared |
-| Adjacent watch paths | New surfaces matter for copy/selection/tool-error or plugin-hook spawn intent (clipboard, scrollback, ACP, `spawn.rs`, …) |
+| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, or session turn-index UI, or a new deliberate fork theme appeared |
+| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, or turn-index UI (clipboard, scrollback, ACP, `spawn.rs`, composer, …) |
 | Build / verify procedure | Toolchain, timeouts, env vars (`HERDR_AGENT`, `GROK_VERSION`), or pass criteria wrong |
 | Safety / push policy | Process friction that should become an explicit rule |
 | Operational gaps | Something non-obvious burned time this run and belongs in the skill |
@@ -388,8 +434,8 @@ Summarize for the user:
 2. **Conflicts:** files (or “none”), resolution summary.
 3. **Fork analysis:** each delta → keep / adapt / drop + one-line rationale;
    include **adjacent re-check** results when upstream touched clipboard /
-   selection / tool-block paths and/or session spawn / plugin-hook wiring
-   (or “n/a — paths untouched” per theme).
+   selection / tool-block paths, session spawn / plugin-hook wiring, and/or
+   turn-index (bubble + composer) paths (or “n/a — paths untouched” per theme).
 4. **Code adjustments:** what was implemented after analysis (or “none”).
 5. **Build:** success/fail, package `xai-grok-pager-bin`, binary path + mtime.
 6. **Version check:** full `grok-local version` line vs expected `$EXPECTED ($SHORT)`.
@@ -420,7 +466,7 @@ git fetch origin main
 git checkout main
 PRE_MERGE_HEAD=$(git rev-parse HEAD)
 git merge origin/main   # resolve + analyze if needed
-# Adjacent re-check (pager + spawn/plugin-hooks): git diff --name-only $OLD_ORIGIN..origin/main -- <watch paths>
+# Adjacent re-check (pager + spawn/plugin-hooks + turn-index UI): git diff --name-only $OLD_ORIGIN..origin/main -- <watch paths>
 cargo build -p xai-grok-pager-bin
 grok-local version      # or HERDR_AGENT=grok ./target/debug/xai-grok-pager version
 # then: re-read this SKILL.md → report skill-review suggestions (or none)

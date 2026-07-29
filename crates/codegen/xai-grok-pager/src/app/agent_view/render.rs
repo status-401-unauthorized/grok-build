@@ -835,6 +835,9 @@ impl AgentView {
             } else {
                 None
             },
+            // Next session turn (0-based, matches `/session-info`). Hidden
+            // automatically when bash/plan overrides the prefix.
+            turn_index: Some(self.next_session_turn_index()),
             placeholder_override: if let Some(ph) = self
                 .prompt_input_mode
                 .placeholder_override(self.multiline_mode)
@@ -954,6 +957,7 @@ impl AgentView {
             accent_color_override: None,
             border_color_override: None,
             prefix_override: None,
+            turn_index: None,
             placeholder_override: None,
             compact: false,
             show_accent_line: false,
@@ -989,6 +993,7 @@ impl AgentView {
                 accent_color_override: None,
                 border_color_override: None,
                 prefix_override: None,
+                turn_index: None,
                 placeholder_override: None,
                 compact: false,
                 show_accent_line: false,
@@ -2348,6 +2353,7 @@ impl AgentView {
                         accent_color_override: None,
                         border_color_override: None,
                         prefix_override: None,
+                        turn_index: None,
                         placeholder_override: None,
                         compact: false,
                         show_accent_line: false,

@@ -72,6 +72,7 @@ pub(super) fn prompt_style(
     input_mode: xai_grok_pager::app::agent_view::PromptInputMode,
     theme: &Theme,
     multiline: bool,
+    turn_index: Option<usize>,
 ) -> PromptStyle {
     PromptStyle {
         focused: true,
@@ -85,6 +86,7 @@ pub(super) fn prompt_style(
         accent_color_override: input_mode.accent_color(theme),
         border_color_override: None,
         prefix_override: input_mode.prefix_override(theme),
+        turn_index,
         placeholder_override: input_mode.placeholder_override(multiline),
         show_accent_line: false,
         show_borders: false,
@@ -122,11 +124,17 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
     let theme = Theme::current();
     let commit_app = super::commit::committed_appearance(appearance);
     let compact = appearance.prompt.compact;
-    let (input_mode, multiline) = agent_id
+    let (input_mode, multiline, turn_index) = agent_id
         .and_then(|id| agents.get(&id))
-        .map(|a| (a.prompt_input_mode, a.multiline_mode))
-        .unwrap_or_default();
-    let style = prompt_style(appearance, input_mode, &theme, multiline);
+        .map(|a| {
+            (
+                a.prompt_input_mode,
+                a.multiline_mode,
+                Some(a.next_session_turn_index()),
+            )
+        })
+        .unwrap_or((Default::default(), false, None));
+    let style = prompt_style(appearance, input_mode, &theme, multiline, turn_index);
     let row_inset = live_left_inset(appearance);
     let layout_cfg = &appearance.scrollback.layout;
     let term_h = terminal.last_known_area().height;
@@ -946,11 +954,12 @@ mod tests {
         use xai_grok_pager::appearance::AppearanceConfig;
         let appearance = AppearanceConfig::default();
         let theme = Theme::current();
-        let normal = prompt_style(&appearance, PromptInputMode::Normal, &theme, false);
+        let normal = prompt_style(&appearance, PromptInputMode::Normal, &theme, false, Some(0));
         assert!(normal.prefix_override.is_none());
         assert!(normal.accent_color_override.is_none());
         assert!(normal.placeholder_override.is_none());
-        let bash = prompt_style(&appearance, PromptInputMode::Bash, &theme, false);
+        assert_eq!(normal.turn_index, Some(0));
+        let bash = prompt_style(&appearance, PromptInputMode::Bash, &theme, false, None);
         assert_eq!(
             bash.prefix_override,
             Some(("! ", theme.command)),

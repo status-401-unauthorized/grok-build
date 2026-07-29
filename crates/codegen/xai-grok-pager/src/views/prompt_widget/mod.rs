@@ -25,6 +25,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::StatefulWidgetRef;
+use unicode_width::UnicodeWidthStr;
 use xai_ratatui_textarea::{ElementId, ElementKind, TextArea, TextAreaState, TextElement};
 
 use crate::clipboard::{SystemClipboard, system_clipboard_get};
@@ -170,6 +171,10 @@ pub struct PromptStyle {
     /// When `Some((str, color))`, replaces the default `❯` prefix.
     /// Used for bash mode (`"! "` in yellow).
     pub prefix_override: Option<(&'static str, ratatui::style::Color)>,
+    /// 0-based session turn index for the *next* plain prompt (matches
+    /// `/session-info` `Turn: N`). Rendered after the ❯ prefix in gray.
+    /// `None` / bash override / history-search hide the label.
+    pub turn_index: Option<usize>,
     /// Override the placeholder text shown when the textarea is empty.
     /// When `Some(text)`, uses this instead of the default `"Build anything"`.
     /// Used for feedback mode (`"Type your feedback..."`).
@@ -234,6 +239,7 @@ impl Default for PromptStyle {
             accent_color_override: None,
             border_color_override: None,
             prefix_override: None,
+            turn_index: None,
             placeholder_override: None,
             compact: false,
             show_accent_line: false,
@@ -268,6 +274,7 @@ impl PromptStyle {
             accent_color_override: None,
             border_color_override: None,
             prefix_override: None,
+            turn_index: None,
             placeholder_override: None,
             compact: false,
             show_accent_line: false,
@@ -291,6 +298,27 @@ impl PromptStyle {
         } else {
             theme.gray_dim
         })
+    }
+
+    /// Display width of the first-line prefix (arrow / override + optional
+    /// `Turn N `). History-search and bash/mode overrides suppress the turn
+    /// label so the fixed override glyphs keep their layout.
+    pub fn prefix_display_width(&self, history_search_filter: bool) -> u16 {
+        if !self.show_prefix {
+            return 0;
+        }
+        let base = PREFIX_WIDTH;
+        let show_turn = !history_search_filter
+            && self.prefix_override.is_none()
+            && self.turn_index.is_some();
+        let turn_w = if show_turn {
+            let n = self.turn_index.expect("checked is_some");
+            // "Turn {n} " including trailing space
+            (format!("Turn {n} ").width()) as u16
+        } else {
+            0
+        };
+        base.saturating_add(turn_w)
     }
 }
 
@@ -1480,7 +1508,9 @@ impl PromptWidget {
         max_height: u16,
     ) -> u16 {
         let content_width = self.content_width(area_width, style);
-        let prefix_w = if style.show_prefix { PREFIX_WIDTH } else { 0 };
+        let prefix_w = style.prefix_display_width(
+            self.history_search.is_active() && !self.history_search.is_browse(),
+        );
         let text_width = content_width.saturating_sub(prefix_w);
         // History browse live-populates the composer per selection move;
         // freeze the box at its pre-open one-row height so stepping through
@@ -2990,27 +3020,42 @@ impl PromptWidget {
             }
         }
 
-        // Render prefix on first text row: search icon when history search is active, else ❯.
-        let prefix_w = if style.show_prefix { PREFIX_WIDTH } else { 0 };
-        if style.show_prefix && text_area_rect.width > PREFIX_WIDTH {
-            let (prefix_str, accent_color) =
-                if self.history_search.is_active() && !self.history_search.is_browse() {
-                    // Search-mode indicator — highest prefix priority. Browse
-                    // mode keeps the normal prefix: the composer holds the
-                    // populated entry (a real draft), not a filter query.
-                    ("? ", theme.accent_user)
-                } else if let Some((p, c)) = style.prefix_override {
-                    // Caller override (e.g., bash mode `! ` in yellow).
-                    (p, c)
-                } else {
-                    (crate::glyphs::prompt_arrow(), style.accent_color(&theme))
-                };
+        // Render prefix on first text row: search icon when history search is
+        // active, else ❯ (+ optional muted `Turn N ` for session turn index).
+        let history_filter = self.history_search.is_active() && !self.history_search.is_browse();
+        let prefix_w = style.prefix_display_width(history_filter);
+        if style.show_prefix && text_area_rect.width > prefix_w {
+            let (prefix_str, accent_color) = if history_filter {
+                // Search-mode indicator — highest prefix priority. Browse
+                // mode keeps the normal prefix: the composer holds the
+                // populated entry (a real draft), not a filter query.
+                ("? ", theme.accent_user)
+            } else if let Some((p, c)) = style.prefix_override {
+                // Caller override (e.g., bash mode `! ` in yellow).
+                (p, c)
+            } else {
+                (crate::glyphs::prompt_arrow(), style.accent_color(&theme))
+            };
             buf.set_string(
                 text_area_rect.x,
                 text_area_rect.y,
                 prefix_str,
                 Style::default().fg(accent_color).bg(bg),
             );
+            // Session turn index (plain Normal mode only).
+            if !history_filter
+                && style.prefix_override.is_none()
+                && let Some(n) = style.turn_index
+            {
+                let label = format!("Turn {n} ");
+                let arrow_w = (prefix_str.width()) as u16;
+                buf.set_string(
+                    text_area_rect.x + arrow_w,
+                    text_area_rect.y,
+                    &label,
+                    Style::default().fg(theme.gray).bg(bg),
+                );
+            }
         }
 
         // TextArea content
