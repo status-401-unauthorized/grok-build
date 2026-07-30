@@ -10,6 +10,7 @@ use crate::scrollback::types::{
 use crate::theme::Theme;
 
 use super::{TOOL_HEADER_RANGE, collapsed_error_suffix};
+use crate::appearance::AppearanceConfig;
 
 /// Selection range for list output and error-body lines (header is 0).
 const LIST_DIR_BODY_RANGE: u16 = 1;
@@ -250,7 +251,7 @@ impl BlockContent for ListDirToolCallBlock {
         }
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false
     }
 

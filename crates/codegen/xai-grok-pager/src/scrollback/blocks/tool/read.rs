@@ -20,6 +20,7 @@ const LAST_LINES: usize = 3;
 /// Selection range for file content preview and error-body lines (header is 0).
 const READ_BODY_RANGE: u16 = 1;
 
+use crate::appearance::AppearanceConfig;
 use xai_grok_tools::implementations::skills::types::skill_name_from_path;
 
 /// What kind of non-text media this read produced.
@@ -479,7 +480,7 @@ impl BlockContent for ReadToolCallBlock {
         }
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false
     }
 
