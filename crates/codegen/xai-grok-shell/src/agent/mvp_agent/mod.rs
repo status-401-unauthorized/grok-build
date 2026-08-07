@@ -721,6 +721,9 @@ struct RetainedResources {
         tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>,
     >,
 }
+/// Per-resident-session `(title, last_turn_summary)` display cache; see
+/// `resident_roster_titles`.
+type RosterDisplayCache = HashMap<String, (Option<String>, Option<String>)>;
 pub struct MvpAgent {
     /// LEADER-SAFE(shared): `Send + Sync` mirror of per-session activity for the
     /// leader's auto-update checker, which cannot read the `!Send` maps. Expires
@@ -728,10 +731,10 @@ pub struct MvpAgent {
     pub(crate) activity: crate::agent::activity::AgentActivity,
     /// LEADER-SAFE(per-session).
     session_registry: SessionRegistry,
-    /// Title per resident session id, refreshed each `build_roster`. Lets the
-    /// synchronous roster deltas reuse the title instead of emitting an empty
-    /// one — `resident_roster_entry` can't read disk.
-    resident_roster_titles: RefCell<HashMap<String, String>>,
+    /// `(title, last_turn_summary)` per resident session id, refreshed each
+    /// `build_roster`. Lets the synchronous roster deltas reuse both instead
+    /// of emitting empty ones — `resident_roster_entry` can't read disk.
+    resident_roster_titles: RefCell<RosterDisplayCache>,
     pub(crate) initialize_request: OnceLock<acp::InitializeRequest>,
     pub(crate) gateway: GatewaySender,
     /// Agent configuration. LEADER-SAFE(init-once): never mutated after construction.
@@ -1104,6 +1107,41 @@ fn read_session_or_init_meta_str<'a>(
         m.and_then(|m| m.get(key)).and_then(|v| v.as_str())
     };
     read(session_meta).or_else(|| read(init_meta))
+}
+/// Resolve `startupHints` for a session spawn: the session request `_meta`
+/// wins over the connection-level `initialize` `_meta`.
+///
+/// Same OnceLock-bypass rationale as [`read_session_or_init_meta_str`], and
+/// it matters most for headless clients: the shared `initialize_request`
+/// holds whichever client initialized this process first, and a leader can
+/// multiplex many logical clients — so on a leader-routed `session/load`
+/// the init-level hints can belong to a *different* client than the one
+/// loading the session. Losing `nonInteractive` silently downgrades
+/// `McpInitStrategy::Blocking` to `Progressive`, letting the first prompt
+/// of a loaded headless session run while the MCP server carrying its only
+/// user-visible output channel is still handshaking.
+///
+/// The first parseable `startupHints` object wins whole (no per-field
+/// merge), mirroring how a client would send it on `initialize`; an
+/// unparseable value falls through, matching the sibling helper's
+/// treatment of wrong-typed values.
+fn startup_hints_from_meta(
+    session_meta: Option<&acp::Meta>,
+    init_meta: Option<&acp::Meta>,
+) -> crate::session::StartupHints {
+    explicit_startup_hints(session_meta)
+        .or_else(|| explicit_startup_hints(init_meta))
+        .unwrap_or_default()
+}
+/// Parse `startupHints` carried explicitly on one `_meta` object. `None`
+/// when absent or unparseable — callers that must distinguish "client made
+/// no claim" from "client sent defaults" (the resident re-attach rail) key
+/// on this, so an attach without hints never resets a session's policy.
+fn explicit_startup_hints(
+    meta: Option<&acp::Meta>,
+) -> Option<crate::session::StartupHints> {
+    meta.and_then(|m| m.get("startupHints"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 use xai_chat_state::conversation_util::replace_or_insert_system_head;
 /// Non-empty `systemPromptOverride` from session meta (preferred) or init meta.

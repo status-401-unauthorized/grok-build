@@ -1453,17 +1453,17 @@ impl MvpAgent {
             xai_chat_state::AuthType::ApiKey
         }
     }
-    /// When `cached_token` cannot proceed, prefer non-interactive `xai.api_key`
-    /// iff `should_advertise_xai_api_key`; otherwise `grok.com`. Returns `None`
-    /// when `preferred_method` is pinned (fail-closed — no cross-method fallthrough).
+    /// Fall through to `xai.api_key` if the startup probe still allows it,
+    /// else `grok.com`. `None` when `preferred_method` is pinned.
     pub(super) fn cached_token_fallthrough_method_id(
         &self,
     ) -> Option<acp::AuthMethodId> {
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
         let id = auth_method::method_id_after_cached_token_unavailable(
-            auth_method::should_advertise_xai_api_key(
+            auth_method::should_advertise_xai_api_key_with_env_ok(
                 self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
                 self.models_manager.models().values(),
+                self.auth_manager.first_party_env_api_key_ok(),
             ),
             preferred,
         )?;
@@ -3059,7 +3059,8 @@ impl MvpAgent {
             return Err("send failed");
         }
         match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-            Ok(Ok(_)) => Ok(()),
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(_))) => Err("flush failed"),
             Ok(Err(_)) => Err("channel closed"),
             Err(_) => Err("timeout"),
         }
@@ -4101,14 +4102,7 @@ impl MvpAgent {
             std::sync::Arc::new(TerminalRunner::new(notifier, session_info.id.clone()))
         };
         let load_envrc = self.cfg.borrow().session.load_envrc.unwrap_or(true);
-        let startup_hints = init
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("startupHints"))
-            .and_then(|v| {
-                serde_json::from_value::<crate::session::StartupHints>(v.clone()).ok()
-            })
-            .unwrap_or_default();
+        let startup_hints = startup_hints_from_meta(session_meta, init.meta.as_ref());
         let hunk_plan = plan_hunk_tracking(
             init
                 .client_capabilities
@@ -4492,6 +4486,10 @@ impl MvpAgent {
         let background_workflows_enabled = self.cfg.borrow().resolve_workflows().value;
         let subagents_enabled = self.cfg.borrow().subagents_enabled;
         let subagents_max_depth = self.cfg.borrow().subagents_max_depth;
+        let workflow_max_concurrent_agents = self
+            .cfg
+            .borrow()
+            .workflow_max_concurrent_agents;
         let ask_user_question_enabled = crate::upload::turn::parse_ask_user_question_from_meta(
                 session_meta,
             )
@@ -4730,6 +4728,7 @@ impl MvpAgent {
                     background_workflows_enabled,
                     subagents_enabled,
                     subagents_max_depth,
+                    workflow_max_concurrent_agents,
                     ask_user_question_enabled,
                     client_hooks,
                     prompt_display_cwd,

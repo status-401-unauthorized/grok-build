@@ -87,6 +87,7 @@ pub(super) fn prompt_style(
         border_color_override: None,
         prefix_override: input_mode.prefix_override(theme),
         turn_index,
+        placeholder_when_focused: false,
         placeholder_override: input_mode.placeholder_override(multiline),
         show_accent_line: false,
         show_borders: false,

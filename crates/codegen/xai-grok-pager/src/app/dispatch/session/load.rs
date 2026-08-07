@@ -1114,10 +1114,11 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         let page_flip_entry = drain.page_flip_entry;
         effects.extend(drain.effects);
         let cwd = agent.session.cwd.clone();
-        effects.push(Effect::HydrateSessionTitleFromDisk {
+        effects.push(Effect::HydrateSessionMetaFromDisk {
             agent_id,
             session_id: hydrate_sid.clone(),
             cwd: cwd.clone(),
+            last_turn_summary_gen: agent.last_turn_summary_gen,
         });
         agent.session.prompt_history_loading = true;
         effects.push(Effect::FetchPromptHistory {
@@ -1138,6 +1139,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
+            nonce: 0,
         });
         if let Some(switch) = deferred {
             agent.session.model_switch_pending = true;

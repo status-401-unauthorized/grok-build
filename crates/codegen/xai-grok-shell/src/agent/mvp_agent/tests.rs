@@ -939,6 +939,32 @@ fn read_session_or_init_meta_str_ignores_non_string_values() {
     );
 }
 #[test]
+fn startup_hints_from_meta_prefers_session_request_over_init() {
+    let session = serde_json::json!({
+        "startupHints": { "nonInteractive": true, "deliveryTools": ["srv__post"] }
+    });
+    let init = serde_json::json!({ "startupHints": { "nonInteractive": false } });
+    let hints = startup_hints_from_meta(session.as_object(), init.as_object());
+    assert!(hints.non_interactive);
+    assert_eq!(hints.delivery_tools, vec!["srv__post"]);
+    assert!(startup_hints_from_meta(None, session.as_object()).non_interactive);
+}
+#[test]
+fn startup_hints_from_meta_session_object_wins_whole_not_merged() {
+    let session = serde_json::json!({ "startupHints": { "skipGitStatus": true } });
+    let init = serde_json::json!({ "startupHints": { "nonInteractive": true } });
+    let hints = startup_hints_from_meta(session.as_object(), init.as_object());
+    assert!(hints.skip_git_status);
+    assert!(!hints.non_interactive);
+}
+#[test]
+fn startup_hints_from_meta_unparseable_falls_through_then_defaults() {
+    let bad = serde_json::json!({ "startupHints": "yes" });
+    let init = serde_json::json!({ "startupHints": { "nonInteractive": true } });
+    assert!(startup_hints_from_meta(bad.as_object(), init.as_object()).non_interactive);
+    assert!(!startup_hints_from_meta(None, None).non_interactive);
+}
+#[test]
 fn system_prompt_override_from_meta_prefers_session_and_rejects_empty() {
     let session = serde_json::json!({ "systemPromptOverride": "from session" });
     let init = serde_json::json!({ "systemPromptOverride": "from init" });
@@ -3644,6 +3670,256 @@ async fn drive_close(agent: &MvpAgent, session_id: &str) -> Result<acp::ExtRespo
             std::sync::Arc::from(raw),
         ))
         .await
+}
+/// Every method `parse_queue_edit_command` accepts must be forwarded from
+/// `ext_notification` to that session's mailbox. Parser-only coverage misses
+/// a dispatch drop.
+#[tokio::test(flavor = "current_thread")]
+async fn ext_notification_forwards_each_queue_method_to_session_actor() {
+    use acp::Agent as _;
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("sess-queue-rt");
+    let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
+    agent.insert_resident(&sid, handle);
+    let session_id = sid.0.as_ref();
+    let cases: [(&str, serde_json::Value); 7] = [
+        (
+            "x.ai/queue/remove",
+            serde_json::json!({
+                "sessionId": session_id,
+                "id": "p-remove",
+                "expectedVersion": 3,
+                "owner": "grok-tui",
+            }),
+        ),
+        (
+            "x.ai/queue/reorder",
+            serde_json::json!({
+                "sessionId": session_id,
+                "orderedIds": ["a", "b"],
+            }),
+        ),
+        (
+            "x.ai/queue/clear",
+            serde_json::json!({
+                "sessionId": session_id,
+                "clientIdentifier": "grok-desktop",
+            }),
+        ),
+        (
+            "x.ai/queue/edit",
+            serde_json::json!({
+                "sessionId": session_id,
+                "id": "p-edit",
+                "newText": "rewritten",
+                "owner": "grok-vscode",
+            }),
+        ),
+        (
+            "x.ai/queue/interject",
+            serde_json::json!({
+                "sessionId": session_id,
+                "id": "p-interject",
+                "expectedVersion": 2,
+                "owner": "grok-tui",
+                "newText": "now",
+            }),
+        ),
+        (
+            "x.ai/queue/hold_edit",
+            serde_json::json!({
+                "sessionId": session_id,
+                "id": "p-hold",
+            }),
+        ),
+        (
+            "x.ai/queue/release_edit",
+            serde_json::json!({
+                "sessionId": session_id,
+                "id": "p-release",
+            }),
+        ),
+    ];
+    for (method, params) in cases {
+        let raw = serde_json::value::to_raw_value(&params).expect("serialize queue params");
+        agent
+            .ext_notification(acp::ExtNotification::new(method, raw.into()))
+            .await
+            .unwrap_or_else(|e| panic!("{method} ext_notification failed: {e}"));
+        let cmd = cmd_rx.try_recv().unwrap_or_else(|e| {
+            panic!("{method} must land a SessionCommand on the actor mailbox, try_recv={e}")
+        });
+        match (method, cmd) {
+            (
+                "x.ai/queue/remove",
+                SessionCommand::RemoveQueuedPrompt {
+                    id,
+                    expected_version,
+                    owner,
+                },
+            ) => {
+                assert_eq!(id, "p-remove");
+                assert_eq!(expected_version, 3);
+                assert_eq!(owner.as_deref(), Some("grok-tui"));
+            }
+            ("x.ai/queue/reorder", SessionCommand::ReorderQueue { ordered_ids }) => {
+                assert_eq!(ordered_ids, vec!["a", "b"]);
+            }
+            ("x.ai/queue/clear", SessionCommand::ClearQueue { owner }) => {
+                assert_eq!(owner.as_deref(), Some("grok-desktop"));
+            }
+            (
+                "x.ai/queue/edit",
+                SessionCommand::EditQueuedPrompt {
+                    id,
+                    new_text,
+                    editor,
+                },
+            ) => {
+                assert_eq!(id, "p-edit");
+                assert_eq!(new_text, "rewritten");
+                assert_eq!(editor.as_deref(), Some("grok-vscode"));
+            }
+            (
+                "x.ai/queue/interject",
+                SessionCommand::InterjectQueuedPrompt {
+                    id,
+                    expected_version,
+                    owner,
+                    new_text,
+                },
+            ) => {
+                assert_eq!(id, "p-interject");
+                assert_eq!(expected_version, 2);
+                assert_eq!(owner.as_deref(), Some("grok-tui"));
+                assert_eq!(new_text.as_deref(), Some("now"));
+            }
+            ("x.ai/queue/hold_edit", SessionCommand::HoldCombineEdit { id }) => {
+                assert_eq!(id, "p-hold");
+            }
+            ("x.ai/queue/release_edit", SessionCommand::ReleaseCombineEdit { id }) => {
+                assert_eq!(id, "p-release");
+            }
+            (method, _) => {
+                panic!("{method} dispatched a SessionCommand of the wrong variant")
+            }
+        }
+    }
+    assert!(
+        matches!(
+            cmd_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "no extra SessionCommand may remain after the seven queue methods"
+    );
+}
+/// Methods the parser rejects (unknown, outbound `changed`, missing id /
+/// newText) and a missing session must not send a command or panic.
+#[tokio::test(flavor = "current_thread")]
+async fn ext_notification_queue_rejects_unknown_method_missing_id_and_unknown_session() {
+    use acp::Agent as _;
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("sess-queue-neg");
+    let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
+    agent.insert_resident(&sid, handle);
+    let session_id = sid.0.as_ref();
+    let negatives: [(&str, serde_json::Value); 9] = [
+        (
+            "x.ai/queue/bogus",
+            serde_json::json!({ "sessionId": session_id, "id": "p1" }),
+        ),
+        (
+            "x.ai/queue/changed",
+            serde_json::json!({
+                "sessionId": session_id,
+                "entries": [{
+                    "id": "p1",
+                    "version": 0,
+                    "kind": "prompt",
+                    "text": "hello",
+                    "position": 0,
+                }],
+            }),
+        ),
+        (
+            "x.ai/queue/hold_edit",
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+        (
+            "x.ai/queue/release_edit",
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+        (
+            "x.ai/queue/remove",
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+        (
+            "x.ai/queue/edit",
+            serde_json::json!({ "sessionId": session_id, "newText": "x" }),
+        ),
+        (
+            "x.ai/queue/edit",
+            serde_json::json!({ "sessionId": session_id, "id": "p-edit" }),
+        ),
+        (
+            "x.ai/queue/interject",
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+        (
+            "x.ai/queue/hold_edit",
+            serde_json::json!({ "sessionId": "no-such-session", "id": "p1" }),
+        ),
+    ];
+    for (method, params) in negatives {
+        let raw = serde_json::value::to_raw_value(&params).expect("serialize queue params");
+        agent
+            .ext_notification(acp::ExtNotification::new(method, raw.into()))
+            .await
+            .unwrap_or_else(|e| panic!("{method} ext_notification must not fail: {e}"));
+        assert!(
+            matches!(
+                cmd_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "{method} must not send a SessionCommand (params={params})"
+        );
+    }
+    let agent_empty = build_minimal_agent_for_tests();
+    let raw = serde_json::value::to_raw_value(&serde_json::json!({
+        "sessionId": "ghost",
+        "id": "p1",
+    }))
+    .expect("serialize");
+    agent_empty
+        .ext_notification(acp::ExtNotification::new(
+            "x.ai/queue/release_edit",
+            raw.into(),
+        ))
+        .await
+        .expect("queue edit for a missing session must not error");
+}
+/// Fire-and-forget: a gone session actor must not turn `ext_notification`
+/// into an error or panic.
+#[tokio::test(flavor = "current_thread")]
+async fn ext_notification_queue_edit_survives_dropped_actor_mailbox() {
+    use acp::Agent as _;
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("sess-queue-dead");
+    let (handle, _tx, cmd_rx) = make_live_session_handle(&sid, None);
+    agent.insert_resident(&sid, handle);
+    drop(cmd_rx);
+    let params = serde_json::json!({
+        "sessionId": sid.0.as_ref(),
+        "id": "p-hold",
+    });
+    let raw = serde_json::value::to_raw_value(&params).expect("serialize queue params");
+    agent
+        .ext_notification(acp::ExtNotification::new(
+            "x.ai/queue/hold_edit",
+            raw.into(),
+        ))
+        .await
+        .expect("queue edit must not error when the session actor mailbox is gone");
 }
 /// No-evict keystone: a client disconnecting mid-turn must NOT destroy the
 /// session. The actor stays resident, no `Shutdown` is sent, the resident

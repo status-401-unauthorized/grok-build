@@ -295,12 +295,15 @@ impl MvpAgent {
                 h.yolo_mode,
             )
         };
+        let (title, last_turn_summary) = self
+            .resident_roster_titles
+            .borrow()
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default();
         Some(crate::agent::roster::RosterEntry {
-            title: self
-                .resident_roster_titles
-                .borrow()
-                .get(&session_id)
-                .cloned(),
+            title,
+            last_turn_summary,
             session_id,
             cwd,
             is_worktree,
@@ -336,7 +339,12 @@ impl MvpAgent {
         *self.resident_roster_titles.borrow_mut() = entries
             .iter()
             .filter(|e| e.resident)
-            .filter_map(|e| Some((e.session_id.clone(), e.title.clone()?)))
+            .map(|e| {
+                (
+                    e.session_id.clone(),
+                    (e.title.clone(), e.last_turn_summary.clone()),
+                )
+            })
             .collect();
     }
     /// Emit the final roster delta, then drop the session from all maps.
@@ -460,6 +468,7 @@ impl MvpAgent {
             subagent_pending: subagents.pending,
             subagent_active: subagents.active,
             subagent_completed: subagents.completed,
+            subagent_queued: subagents.queued,
             workspace_bindings: workspace.map(|h| h.session_count()),
             workspace_activity_sessions: workspace.map(|h| h.activity_tracker().session_count()),
         }
@@ -487,6 +496,8 @@ pub(crate) struct RegistrySnapshot {
     pub subagent_pending: usize,
     pub subagent_active: usize,
     pub subagent_completed: usize,
+    /// Spawns parked at the session concurrent limit.
+    pub subagent_queued: usize,
     pub workspace_bindings: Option<usize>,
     pub workspace_activity_sessions: Option<usize>,
 }
