@@ -180,6 +180,14 @@ intent unless analysis shows upstream absorbed them:
    - Composer style/render: `views/prompt_widget/mod.rs` (`PromptStyle.turn_index`)
    - Full TUI wiring: `app/agent_view/render.rs`
    - Minimal mode wiring: `xai-grok-pager-minimal` `live.rs` / `overlay.rs`
+     / `plan.rs` (chromeless feedback styles still set `turn_index: None`)
+   - **`PromptStyle` field-list conflicts:** when upstream adds a new field
+     next to fork-only `turn_index` (example: `placeholder_when_focused`),
+     keep **both** `turn_index` and every new upstream field on the struct,
+     `Default` / `inline()` helpers, and every full `PromptStyle { … }`
+     literal. Never take a single side of a field-list conflict — origin-only
+     drops turn labels; HEAD-only fails to compile when a required field is
+     missing.
 
 **Adjacent re-check (even with a clean merge / no fork-file conflicts):**
 fork intent can break without a Git conflict on the fork files themselves.
@@ -223,12 +231,16 @@ crates/codegen/xai-grok-pager/src/app/agent_view/render.rs
 crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs
 crates/codegen/xai-grok-pager/src/acp/tracker.rs
 crates/codegen/xai-grok-pager-minimal/src/live.rs
+crates/codegen/xai-grok-pager-minimal/src/overlay.rs
+crates/codegen/xai-grok-pager-minimal/src/plan.rs
 ```
 
 Confirm post-merge: plain bubbles render `Turn {n}` when `prompt_index` is
 set; composer shows next index via `PromptStyle.turn_index` +
 `next_session_turn_index()`; bash/cron/interjections stay unlabeled;
-minimal `prompt_style(..., turn_index)` still wired.
+minimal `prompt_style(..., turn_index)` still wired; every `PromptStyle`
+literal still has both `turn_index` and any upstream-only fields (e.g.
+`placeholder_when_focused`).
 
 How to check (use the **upstream-only** commit range — not
 `PRE_MERGE_HEAD..origin/main`):
