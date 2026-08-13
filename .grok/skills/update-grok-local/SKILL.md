@@ -158,7 +158,7 @@ intent unless analysis shows upstream absorbed them:
 
 1. **Pager tool-error UI** — copyable tool errors, hide paths in collapsed
    headers. Primary paths: `scrollback/blocks/tool/*`, `scrollback/block.rs`,
-   `acp/tracker.rs`.
+   `acp/tracker.rs`, `acp/tracker_tests.rs`.
 2. **Plugin hooks at spawn** — merge enabled+trusted plugin hooks into the
    session `HookRegistry` at session start (not only on mid-session
    ReloadHooks / ReloadPlugins). Primary path:
@@ -173,7 +173,8 @@ intent unless analysis shows upstream absorbed them:
    - Bubble render: `scrollback/blocks/user.rs` (`prompt_index` → `Turn {n} `)
    - Optimistic stamp on local drain: `app/dispatch/queue.rs`
    - Shell stamp preferred on echo: `acp/tracker.rs` (always apply
-     `promptIndex` meta, not only when `None`)
+     `promptIndex` meta, not only when `None`). Fork-only tracker tests
+     live in `acp/tracker_tests.rs` (e.g. `echo_prompt_index_backfill_*`).
    - Next index for composer: `AgentView::next_session_turn_index` in
      `app/agent_view/session.rs` (max stamped `prompt_index` + 1, else plain
      user-prompt count)
@@ -189,6 +190,13 @@ intent unless analysis shows upstream absorbed them:
      drops turn labels; HEAD-only fails to compile when a required field is
      missing.
 
+**`tracker.rs` test-extract conflicts:** origin owns unit tests in
+`acp/tracker_tests.rs` (`#[cfg(test)]` + `#[path = "tracker_tests.rs"]
+mod tests;`). If a conflict is inline `mod tests { … }` vs that path
+attribute, **take the extract** and **port** any fork-only tests into
+`tracker_tests.rs`. Do not keep the inline module — the next origin
+sync will re-conflict a multi-thousand-line test blob.
+
 **Adjacent re-check (even with a clean merge / no fork-file conflicts):**
 fork intent can break without a Git conflict on the fork files themselves.
 
@@ -201,6 +209,7 @@ crates/codegen/xai-grok-pager-render/src/clipboard/
 crates/codegen/xai-grok-pager/src/scrollback/block.rs
 crates/codegen/xai-grok-pager/src/scrollback/blocks/tool/
 crates/codegen/xai-grok-pager/src/acp/tracker.rs
+crates/codegen/xai-grok-pager/src/acp/tracker_tests.rs
 ```
 
 **Plugin hooks at spawn** — if the upstream range touches session spawn,
@@ -230,6 +239,7 @@ crates/codegen/xai-grok-pager/src/app/agent_view/session.rs
 crates/codegen/xai-grok-pager/src/app/agent_view/render.rs
 crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs
 crates/codegen/xai-grok-pager/src/acp/tracker.rs
+crates/codegen/xai-grok-pager/src/acp/tracker_tests.rs
 crates/codegen/xai-grok-pager-minimal/src/live.rs
 crates/codegen/xai-grok-pager-minimal/src/overlay.rs
 crates/codegen/xai-grok-pager-minimal/src/plan.rs
@@ -246,9 +256,9 @@ How to check (use the **upstream-only** commit range — not
 `PRE_MERGE_HEAD..origin/main`):
 
 `PRE_MERGE_HEAD..origin/main` is a tree comparison. When the fork already
-diverges in `tool/*`, `tracker.rs`, `spawn.rs`, or turn-index UI paths,
-those paths show up as “changed” even if upstream never touched them this
-sync. Always diff the commits that landed on origin:
+diverges in `tool/*`, `tracker.rs`, `tracker_tests.rs`, `spawn.rs`, or
+turn-index UI paths, those paths show up as “changed” even if upstream
+never touched them this sync. Always diff the commits that landed on origin:
 
 ```bash
 # Prefer OLD_ORIGIN recorded in Step 1 (pre-fetch origin/main tip).
