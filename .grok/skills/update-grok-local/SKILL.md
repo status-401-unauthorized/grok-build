@@ -189,6 +189,13 @@ intent unless analysis shows upstream absorbed them:
      literal. Never take a single side of a field-list conflict — origin-only
      drops turn labels; HEAD-only fails to compile when a required field is
      missing.
+   - **Echo-skip loop conflicts:** origin’s `skip_next_user_echo` path in
+     `acp/tracker.rs` still gates `promptIndex` on `block.prompt_index.is_none()`
+     and may add sibling backfills in the same loop (example: `replay_ts` →
+     `entry.created_at`). Keep fork always-apply `prompt_index` **and** every
+     origin sibling backfill. Never take a single side — origin-only drops
+     shell-authoritative turn stamps; HEAD-only drops replay timestamps (or
+     whatever else origin added next to the stamp).
 
 **`tracker.rs` test-extract conflicts:** origin owns unit tests in
 `acp/tracker_tests.rs` (`#[cfg(test)]` + `#[path = "tracker_tests.rs"]
