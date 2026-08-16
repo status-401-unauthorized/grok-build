@@ -2,21 +2,23 @@
 name: update-grok-local
 description: >
   Sync this fork’s main from upstream (origin/main), resolve and analyze merge
-  conflicts for fork-specific changes, rebuild xai-grok-pager, and verify
-  grok-local version matches the source version. Use when the user runs
-  /update-grok-local, says “update grok-local”, “sync upstream into fork”,
-  “refresh local grok build”, or wants to pull monorepo main and rebuild the
-  local binary.
+  conflicts for fork-specific changes, rebuild xai-grok-pager only when
+  upstream commits were merged, and verify grok-local version. Use when the
+  user runs /update-grok-local, says “update grok-local”, “sync upstream into
+  fork”, “refresh local grok build”, or wants to pull monorepo main and
+  rebuild the local binary.
 metadata:
-  short-description: "Sync origin/main → fork, rebuild grok-local"
+  short-description: "Sync origin/main → fork; rebuild only if commits merged"
 ---
 
-# /update-grok-local — Sync upstream, preserve fork deltas, rebuild
+# /update-grok-local — Sync upstream, preserve fork deltas, rebuild if needed
 
 End-to-end workflow to pull `origin/main` into this fork’s `main`, keep or
-adapt fork-only changes after conflict analysis, rebuild the local binary,
-confirm `grok-local version` matches the tree, then **review this skill** for
-vital updates and show any suggestions to the user before closing.
+adapt fork-only changes after conflict analysis, rebuild the local binary
+**only when this run merged upstream commits**, confirm `grok-local version`
+(against the just-built binary after a rebuild, or the existing binary when
+the rebuild was skipped), then **review this skill** for vital updates and
+show any suggestions to the user before closing.
 
 ## Preconditions (abort early if unmet)
 
@@ -53,8 +55,9 @@ git rev-parse --short fork/main 2>/dev/null || true
 | Publish target for this fork | `fork` | `main` |
 
 Merge **upstream into local main**, then (only if user asks or skill is run
-with push intent) update `fork/main`. Default of this skill: **local merge +
-build**; do **not** `git push` without explicit user approval.
+with push intent) update `fork/main`. Default of this skill: **local merge;
+build only if this run merged upstream commits**; do **not** `git push`
+without explicit user approval.
 
 ## Steps
 
@@ -79,8 +82,10 @@ git log --oneline --left-right --cherry-pick HEAD...origin/main | head -40
 git rev-list --left-right --count HEAD...origin/main
 ```
 
-If already up to date with `origin/main` (0 commits to merge), skip merge/conflict
-steps and jump to **Step 6 (build)** unless the user only wanted a version rebuild.
+If already up to date with `origin/main` (0 commits to merge), skip merge,
+conflict, analysis, **and build**. Jump to **Step 7 (version report)** for the
+existing binary, then **Step 8**. Do **not** rebuild unless the user explicitly
+asked to rebuild anyway.
 
 ### 2. Merge origin/main into local main
 
@@ -99,9 +104,13 @@ Commit message style used in this repo when wrapping merges:
 Merge origin/main: sync monorepo into fork; <brief note of preserved fork deltas>
 ```
 
-If the merge completes cleanly, note “no conflicts” and continue to Step 4
-with a light fork-delta review (Step 4 still runs — use the pre-merge fork tip
-vs merge-base to list unique fork commits).
+If `git merge` reports “Already up to date” (0 commits merged), skip
+Steps 3–6 and jump to Step 7, then Step 8. Do **not** rebuild.
+
+If the merge completes cleanly **and brought in upstream commits**, note
+“no conflicts” and continue to Step 4 with a light fork-delta review
+(Step 4 still runs — use the pre-merge fork tip vs merge-base to list
+unique fork commits).
 
 ### 3. Resolve conflicts
 
@@ -322,6 +331,15 @@ If Step 4 requires code changes beyond pure conflict resolution:
 
 ### 6. Build the local binary
 
+**Skip the rebuild** when this run merged **zero** commits from upstream
+(already up to date after fetch, or `git merge` reported “Already up to
+date”). Do not run `cargo build`. Record
+`Build: skipped — no upstream commits merged` and continue to Step 7
+(report the existing binary) then Step 8.
+
+Exception: rebuild anyway only if the user explicitly requested a rebuild
+regardless of sync result (e.g. “rebuild anyway”, “refresh the binary”).
+
 `grok-local` is expected to point at the debug pager binary in this tree:
 
 ```bash
@@ -398,9 +416,13 @@ else
 fi
 echo "$OUT"
 
-# Pass criteria: output contains EXPECTED and SHORT (commit is baked at build time)
+# Pass criteria after a rebuild: output contains EXPECTED and SHORT
+# (commit is baked at build time). After a skipped rebuild, still print
+# OUT vs EXPECTED/SHORT, but do not rebuild to “fix” a mismatch.
 echo "$OUT" | grep -F "$EXPECTED" && echo "$OUT" | grep -F "$SHORT"
 ```
+
+When the rebuild **ran**:
 
 **Pass:** `grok-local version` (or equivalent path) shows `grok $EXPECTED ($SHORT) …`
 
@@ -414,10 +436,15 @@ On fail: confirm alias path, `ls -l` binary mtime, rebuild with
 `cargo clean -p xai-grok-pager-bin` only if incremental link is wrong, then
 re-run verification.
 
+When the rebuild was **skipped** (no upstream commits merged): report the
+existing `grok-local version` line vs `$EXPECTED ($SHORT)`. If they differ,
+note the mismatch and that the binary was left as-is — do **not** rebuild
+unless the user asks.
+
 ### 8. Review this skill (mandatory before closing)
 
-After the build/version work is done (success or documented failure), re-read
-this file:
+After the build/version work is done (rebuild success, skipped rebuild, or
+documented failure), re-read this file:
 
 ```text
 .grok/skills/update-grok-local/SKILL.md
@@ -466,8 +493,11 @@ Summarize for the user:
    selection / tool-block paths, session spawn / plugin-hook wiring, and/or
    turn-index (bubble + composer) paths (or “n/a — paths untouched” per theme).
 4. **Code adjustments:** what was implemented after analysis (or “none”).
-5. **Build:** success/fail, package `xai-grok-pager-bin`, binary path + mtime.
-6. **Version check:** full `grok-local version` line vs expected `$EXPECTED ($SHORT)`.
+5. **Build:** success / fail / **skipped — no upstream commits merged**,
+   package `xai-grok-pager-bin`, binary path + mtime (existing binary when
+   skipped).
+6. **Version check:** full `grok-local version` line vs expected
+   `$EXPECTED ($SHORT)`. After a skip, report mismatch without rebuilding.
 7. **Next steps (optional):** push to `fork/main` only if user wants:
    `git push fork main` (require confirmation — shared remote).
 8. **Skill review:** “no vital updates” or numbered suggestions (Step 8). Never
@@ -481,8 +511,11 @@ Summarize for the user:
   unrecoverable state.
 - Do not skip Step 4 (analysis) when there were conflicts or unique fork
   commits.
-- Do not claim version success without running the version command against the
-  binary that was just built.
+- Do not rebuild when this run merged zero commits from upstream, unless the
+  user explicitly asked to rebuild anyway.
+- After a rebuild, do not claim version success without running the version
+  command against the binary that was just built. After a skipped rebuild,
+  report the existing binary’s version; do not claim it was just built.
 - Do not skip Step 8 (skill review). Do not silently edit this skill; propose
   and wait for the user.
 
@@ -495,8 +528,9 @@ git fetch origin main
 git checkout main
 PRE_MERGE_HEAD=$(git rev-parse HEAD)
 git merge origin/main   # resolve + analyze if needed
+# If 0 commits merged from upstream: skip cargo build; report existing version
 # Adjacent re-check (pager + spawn/plugin-hooks + turn-index UI): git diff --name-only $OLD_ORIGIN..origin/main -- <watch paths>
-cargo build -p xai-grok-pager-bin
+cargo build -p xai-grok-pager-bin   # only if this run merged upstream commits
 grok-local version      # or HERDR_AGENT=grok ./target/debug/xai-grok-pager version
 # then: re-read this SKILL.md → report skill-review suggestions (or none)
 ```
