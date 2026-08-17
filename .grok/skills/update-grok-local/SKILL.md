@@ -205,6 +205,24 @@ intent unless analysis shows upstream absorbed them:
      origin sibling backfill. Never take a single side — origin-only drops
      shell-authoritative turn stamps; HEAD-only drops replay timestamps (or
      whatever else origin added next to the stamp).
+4. **Windows proto-build / pager stack** — native Windows link of
+   `xai-grok-pager-bin`. Three pieces, all required:
+   - Skip the in-repo `bin/protoc` DotSlash wrapper (shebang + JSON, not a
+     PE `MZ` image; `CreateProcess` fails with `ERROR_BAD_EXE_FORMAT`) and
+     fall back to PATH / `$PROTOC`.
+   - Write `protoc --dependency_out` / `--descriptor_set_out` to temp files
+     (`/dev/stdout` and `/dev/null` are not valid Windows paths).
+   - Raise the pager main-thread stack to 8 MiB (`/STACK:8388608` on MSVC,
+     `-Wl,--stack,8388608` otherwise) so clap parsing does not overflow.
+   Primary paths:
+   - `crates/build/xai-proto-build/src/find_protoc.rs` (`is_pe_executable`)
+   - `crates/build/xai-proto-build/src/lib.rs` (Windows temp-file deps,
+     `makefile_dependency_paths`)
+   - `crates/codegen/xai-grok-pager-bin/build.rs` (`CARGO_CFG_TARGET_OS`
+     windows stack link-arg)
+   If upstream changes protoc discovery, `--dependency_out`, or pager-bin
+   `build.rs`, keep the Windows PE skip, temp-file deps, and 8 MiB stack
+   **and** every new upstream path. Never take a single side.
 
 **`tracker.rs` test-extract conflicts:** origin owns unit tests in
 `acp/tracker_tests.rs` (`#[cfg(test)]` + `#[path = "tracker_tests.rs"]
@@ -268,13 +286,25 @@ minimal `prompt_style(..., turn_index)` still wired; every `PromptStyle`
 literal still has both `turn_index` and any upstream-only fields (e.g.
 `placeholder_when_focused`).
 
+**Windows proto-build / pager stack** — if the upstream range touches
+protoc discovery, proto-build dependency emission, or pager-bin `build.rs`,
+re-verify the Windows PE skip, temp-file `--dependency_out`, and 8 MiB
+stack link-arg still exist. Watch at least:
+
+```text
+crates/build/xai-proto-build/src/find_protoc.rs
+crates/build/xai-proto-build/src/lib.rs
+crates/codegen/xai-grok-pager-bin/build.rs
+```
+
 How to check (use the **upstream-only** commit range — not
 `PRE_MERGE_HEAD..origin/main`):
 
 `PRE_MERGE_HEAD..origin/main` is a tree comparison. When the fork already
-diverges in `tool/*`, `tracker.rs`, `tracker_tests.rs`, `spawn.rs`, or
-turn-index UI paths, those paths show up as “changed” even if upstream
-never touched them this sync. Always diff the commits that landed on origin:
+diverges in `tool/*`, `tracker.rs`, `tracker_tests.rs`, `spawn.rs`,
+turn-index UI paths, or Windows proto-build / pager-bin `build.rs`, those
+paths show up as “changed” even if upstream never touched them this sync.
+Always diff the commits that landed on origin:
 
 ```bash
 # Prefer OLD_ORIGIN recorded in Step 1 (pre-fetch origin/main tip).
@@ -299,6 +329,12 @@ git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
   crates/codegen/xai-grok-pager/src/app/agent_view/ \
   crates/codegen/xai-grok-pager/src/app/dispatch/queue.rs \
   crates/codegen/xai-grok-pager-minimal/src/
+
+# Did this upstream sync touch Windows proto-build / pager stack?
+git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
+  crates/build/xai-proto-build/src/find_protoc.rs \
+  crates/build/xai-proto-build/src/lib.rs \
+  crates/codegen/xai-grok-pager-bin/build.rs
 ```
 
 If any pager watch paths appear, skim the upstream diff for selection ranges,
@@ -313,6 +349,10 @@ hooks are still appended at spawn (not only on reload).
 If turn-index paths appear, re-read bubble + composer wiring; confirm
 `Turn {n}` still shows on plain prompts and the composer next-index still
 matches `/session-info` semantics.
+
+If proto-build or pager-bin `build.rs` appear, re-read the post-merge
+Windows branches; confirm the DotSlash wrapper is still skipped, deps
+still go to a temp file, and the 8 MiB stack link-arg is still emitted.
 
 Note outcomes in the fork-analysis section of the completion report
 (“adjacent re-check: pass / adapt needed” per theme, or “n/a — paths
@@ -461,8 +501,8 @@ next `/update-grok-local` stays accurate.
 | Remotes / branches | Remote names or tracking model changed |
 | Package / binary paths | `xai-grok-pager-bin`, artifact path, or `grok-local` wiring changed |
 | Version sources | Semver crate, `build.rs` embed, or channel labeling changed |
-| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, or session turn-index UI, or a new deliberate fork theme appeared |
-| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, or turn-index UI (clipboard, scrollback, ACP, `spawn.rs`, composer, …) |
+| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, or Windows proto-build / pager stack, or a new deliberate fork theme appeared |
+| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, or Windows proto-build / pager stack (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, …) |
 | Build / verify procedure | Toolchain, timeouts, env vars (`HERDR_AGENT`, `GROK_VERSION`), or pass criteria wrong |
 | Safety / push policy | Process friction that should become an explicit rule |
 | Operational gaps | Something non-obvious burned time this run and belongs in the skill |
@@ -490,8 +530,9 @@ Summarize for the user:
 2. **Conflicts:** files (or “none”), resolution summary.
 3. **Fork analysis:** each delta → keep / adapt / drop + one-line rationale;
    include **adjacent re-check** results when upstream touched clipboard /
-   selection / tool-block paths, session spawn / plugin-hook wiring, and/or
-   turn-index (bubble + composer) paths (or “n/a — paths untouched” per theme).
+   selection / tool-block paths, session spawn / plugin-hook wiring,
+   turn-index (bubble + composer) paths, and/or Windows proto-build /
+   pager-bin `build.rs` (or “n/a — paths untouched” per theme).
 4. **Code adjustments:** what was implemented after analysis (or “none”).
 5. **Build:** success / fail / **skipped — no upstream commits merged**,
    package `xai-grok-pager-bin`, binary path + mtime (existing binary when
@@ -529,7 +570,7 @@ git checkout main
 PRE_MERGE_HEAD=$(git rev-parse HEAD)
 git merge origin/main   # resolve + analyze if needed
 # If 0 commits merged from upstream: skip cargo build; report existing version
-# Adjacent re-check (pager + spawn/plugin-hooks + turn-index UI): git diff --name-only $OLD_ORIGIN..origin/main -- <watch paths>
+# Adjacent re-check (pager + spawn/plugin-hooks + turn-index UI + Windows proto-build): git diff --name-only $OLD_ORIGIN..origin/main -- <watch paths>
 cargo build -p xai-grok-pager-bin   # only if this run merged upstream commits
 grok-local version      # or HERDR_AGENT=grok ./target/debug/xai-grok-pager version
 # then: re-read this SKILL.md → report skill-review suggestions (or none)
