@@ -1,7 +1,20 @@
 use anyhow::{Context, bail};
 use std::env;
+#[cfg(windows)]
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// True when `path` looks like a Windows PE image (`MZ` header).
+/// The in-repo DotSlash wrapper is a shebang + JSON text file.
+#[cfg(windows)]
+fn is_pe_executable(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 2];
+    file.read_exact(&mut magic).is_ok() && magic == *b"MZ"
+}
 
 fn check_protoc_good(protoc: &Path) -> anyhow::Result<()> {
     let output = Command::new(protoc)
@@ -56,6 +69,19 @@ pub fn find_protoc() -> anyhow::Result<Option<PathBuf>> {
         // Return relative path to make build more deterministic.
         let protoc = dir_rel.join("bin/protoc");
         if protoc.try_exists()? {
+            // The in-repo `bin/protoc` is a DotSlash wrapper (shebang + JSON).
+            // It has no Windows platform, and CreateProcess rejects the text
+            // file with ERROR_BAD_EXE_FORMAT (os error 193). Skip straight to
+            // PATH / $PROTOC rather than attempting to execute it.
+            #[cfg(windows)]
+            if !is_pe_executable(&protoc) {
+                eprintln!(
+                    "bin/protoc at `{}` is not a Windows executable \
+                     (DotSlash wrapper); trying protoc from PATH as fallback",
+                    protoc.display()
+                );
+                break;
+            }
             match check_protoc_good(&protoc) {
                 Ok(()) => return Ok(Some(protoc)),
                 Err(e) => {

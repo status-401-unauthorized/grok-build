@@ -4,7 +4,9 @@ pub mod find_protoc;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::{fs, iter};
+use std::fs;
+#[cfg(not(windows))]
+use std::iter;
 
 /// Find the protoc well-known types include directory.
 ///
@@ -126,11 +128,27 @@ impl XaiProtoBuilder {
         }
 
         // Can only process one input file when using --dependency_out=FILE.
+        // `/dev/stdout` and `/dev/null` are not valid paths on Windows
+        // (protoc errors with "No such file or directory").
         for proto in protos {
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
+            #[cfg(not(windows))]
             command
                 .arg("--dependency_out=/dev/stdout")
                 .arg("--descriptor_set_out=/dev/null");
+            #[cfg(windows)]
+            let tmp = tempfile::TempDir::new().context("temp dir for protoc --dependency_out")?;
+            #[cfg(windows)]
+            let deps_path = tmp.path().join("deps.d");
+            #[cfg(windows)]
+            {
+                command
+                    .arg(format!("--dependency_out={}", deps_path.display()))
+                    .arg(format!(
+                        "--descriptor_set_out={}",
+                        tmp.path().join("out.pb").display()
+                    ));
+            }
 
             // Add protoc's well-known types include directory first (if found).
             // This is needed for Bazel sandboxed builds where protoc and its
@@ -151,35 +169,64 @@ impl XaiProtoBuilder {
             command.stdin(Stdio::null());
             command.stderr(Stdio::inherit());
 
-            let output = command.output().context("protoc command failed")?;
-            if !output.status.success() {
-                return Err(anyhow::anyhow!("protoc command failed"));
+            #[cfg(not(windows))]
+            {
+                let output = command.output().context("protoc command failed")?;
+                if !output.status.success() {
+                    return Err(anyhow::anyhow!("protoc command failed"));
+                }
+
+                let output =
+                    String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
+
+                let mut lines = output.lines();
+                let first_line = lines.next().context("protoc command output is empty")?;
+                let prefix = "/dev/null:";
+                let rem = first_line.strip_prefix(prefix).with_context(|| {
+                    format!("protoc command output must start with /dev/null: {output:?}")
+                })?;
+                for line in iter::once(rem).chain(lines) {
+                    let line = line.trim();
+                    let line = line.strip_suffix("\\").unwrap_or(line);
+                    // Depending on absolute paths like
+                    // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
+                    // is valid, but we want to have output more deterministic.
+                    if line.contains("/include/google/protobuf/") {
+                        continue;
+                    }
+
+                    if !fs::exists(line)? {
+                        return Err(anyhow::anyhow!("dependency file not found: {line}"));
+                    }
+
+                    println!("cargo:rerun-if-changed={line}");
+                }
             }
 
-            let output =
-                String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
-
-            let mut lines = output.lines();
-            let first_line = lines.next().context("protoc command output is empty")?;
-            let prefix = "/dev/null:";
-            let rem = first_line.strip_prefix(prefix).with_context(|| {
-                format!("protoc command output must start with /dev/null: {output:?}")
-            })?;
-            for line in iter::once(rem).chain(lines) {
-                let line = line.trim();
-                let line = line.strip_suffix("\\").unwrap_or(line);
-                // Depending on absolute paths like
-                // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
-                // is valid, but we want to have output more deterministic.
-                if line.contains("/include/google/protobuf/") {
-                    continue;
+            #[cfg(windows)]
+            {
+                let status = command.status().context("protoc command failed")?;
+                if !status.success() {
+                    return Err(anyhow::anyhow!("protoc command failed"));
                 }
 
-                if !fs::exists(line)? {
-                    return Err(anyhow::anyhow!("dependency file not found: {line}"));
-                }
+                let output = fs::read_to_string(&deps_path)
+                    .context("failed to read protoc --dependency_out file")?;
 
-                println!("cargo:rerun-if-changed={line}");
+                for path in makefile_dependency_paths(&output)? {
+                    // Depending on absolute paths like
+                    // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
+                    // is valid, but we want to have output more deterministic.
+                    if is_well_known_proto_dep(&path) {
+                        continue;
+                    }
+
+                    if !fs::exists(&path)? {
+                        return Err(anyhow::anyhow!("dependency file not found: {path}"));
+                    }
+
+                    println!("cargo:rerun-if-changed={path}");
+                }
             }
         }
 
@@ -311,6 +358,59 @@ impl XaiProtoBuilder {
     }
 }
 
+/// Parse `protoc --dependency_out` Makefile output into dependency paths.
+///
+/// Windows writes `--descriptor_set_out` to a real file, so the target looks
+/// like `C:\tmp\out.pb: proto/foo.proto`. Drive letters are `C:\`, not `C: `,
+/// so splitting on `: ` / `:\t` is unambiguous.
+#[cfg(windows)]
+fn makefile_dependency_paths(output: &str) -> anyhow::Result<Vec<String>> {
+    let mut paths = Vec::new();
+    let mut seen_target = false;
+    for raw_line in output.lines() {
+        let line = raw_line.trim();
+        let line = line.strip_suffix('\\').unwrap_or(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let rest = if !seen_target {
+            seen_target = true;
+            deps_after_makefile_target(line).with_context(|| {
+                format!("protoc --dependency_out output missing target separator: {output:?}")
+            })?
+        } else {
+            line
+        };
+        for part in rest.split_whitespace() {
+            if !part.is_empty() {
+                paths.push(part.to_string());
+            }
+        }
+    }
+    if !seen_target {
+        return Err(anyhow::anyhow!("protoc --dependency_out output is empty"));
+    }
+    Ok(paths)
+}
+
+#[cfg(windows)]
+fn deps_after_makefile_target(line: &str) -> Option<&str> {
+    if let Some(i) = line.find(": ") {
+        return Some(&line[i + 2..]);
+    }
+    if let Some(i) = line.find(":\t") {
+        return Some(&line[i + 2..]);
+    }
+    // Historical format used by this crate: `--descriptor_set_out=/dev/null`
+    // produces a target of `/dev/null` with no space after the colon.
+    line.strip_prefix("/dev/null:")
+}
+
+#[cfg(windows)]
+fn is_well_known_proto_dep(path: &str) -> bool {
+    path.replace('\\', "/").contains("/include/google/protobuf/")
+}
+
 pub fn configure() -> XaiProtoBuilder {
     let builder = tonic_prost_build::configure()
         .compile_well_known_types(true)
@@ -324,5 +424,38 @@ pub fn configure() -> XaiProtoBuilder {
         pbjson_preserve_proto_field_names: false,
         file_descriptor_set_path: None,
         honor_debug_redact: false,
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_unix_dev_null_dependency_out() {
+        let out = "/dev/null: proto/grok-tools.proto \\\n  proto/other.proto\n";
+        let paths = makefile_dependency_paths(out).unwrap();
+        assert_eq!(
+            paths,
+            ["proto/grok-tools.proto", "proto/other.proto"]
+        );
+    }
+
+    #[test]
+    fn parses_windows_descriptor_path_dependency_out() {
+        let out = r"C:\Users\me\AppData\Local\Temp\tmpABC\out.pb: proto/grok-tools.proto";
+        let paths = makefile_dependency_paths(out).unwrap();
+        assert_eq!(paths, ["proto/grok-tools.proto"]);
+    }
+
+    #[test]
+    fn skips_well_known_types_on_windows_and_unix_paths() {
+        assert!(is_well_known_proto_dep(
+            r"C:\tools\protoc\include\google\protobuf\timestamp.proto"
+        ));
+        assert!(is_well_known_proto_dep(
+            "/opt/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto"
+        ));
+        assert!(!is_well_known_proto_dep("proto/grok-tools.proto"));
     }
 }
