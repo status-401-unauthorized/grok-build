@@ -166,7 +166,18 @@ Known historical fork themes (update if superseded) — treat as high-priority
 intent unless analysis shows upstream absorbed them:
 
 1. **Pager tool-error UI** — copyable tool errors, hide paths in collapsed
-   headers. Primary paths: `scrollback/blocks/tool/*`, `scrollback/block.rs`,
+   headers, and **failed Edit expansion**. A failed `search_replace` must
+   not collapse to a one-line label only (`No matches found` / `Invalid
+   input`). Collapsed: short reason suffix on the header (same pattern as
+   Read). Expanded: detailed tool reason (nearest-match / confusable /
+   invalid-input explanation) plus **Searched for:** `old_string` and
+   **Replacement:** `new_string` (snake_case or camelCase). Built in
+   `extract_edit_error` / `format_edit_error` (`acp/tracker.rs`); Edit
+   header suffix in `scrollback/blocks/tool/edit.rs`. Tests:
+   `extract_edit_error_*`, `failed_edit_block_stores_enriched_error`,
+   `collapsed_failure_shows_basename_and_error_reason`,
+   `expanded_failure_header_is_path_only_body_has_full_error`. Primary
+   paths: `scrollback/blocks/tool/*`, `scrollback/block.rs`,
    `acp/tracker.rs`, `acp/tracker_tests.rs`.
 2. **Plugin hooks at spawn** — merge enabled+trusted plugin hooks into the
    session `HookRegistry` at session start (not only on mid-session
@@ -340,7 +351,11 @@ git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
 If any pager watch paths appear, skim the upstream diff for selection ranges,
 `CopyDelivery` / toast wiring, and tool failure body handling; confirm
 collapsed error suffixes and copyable error text still work (read call sites
-or run focused tool-block / selection tests when practical).
+or run focused tool-block / selection tests when practical). For Edit
+failures, confirm `extract_edit_error` still keeps the short first-line
+label **and** the expanded body (detail + Searched for / Replacement),
+and that `edit.rs` still paints the collapsed reason suffix. Do not
+accept an upstream-only short label that discards `old_string`.
 
 If `spawn.rs` (or related hook/plugin helpers) appear, skim the upstream
 diff and re-read the post-merge spawn hook-registry block; confirm plugin
