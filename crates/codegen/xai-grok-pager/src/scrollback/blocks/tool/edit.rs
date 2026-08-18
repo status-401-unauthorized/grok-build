@@ -988,19 +988,24 @@ impl EditToolCallBlock {
         };
 
         let prefix = self.prefix;
+        let error_style = if muted {
+            theme.muted()
+        } else {
+            Style::default().fg(theme.accent_error)
+        };
 
         // Build the suffix spans first so we can reserve space for them.
-        // The suffix (diffstat / "(N edits)") renders only on the collapsed
-        // one-liner: expanded and fullscreen surfaces show the hunks, so
-        // their headers stay bare. Diffstat counts keep their diff colors
-        // even when the header is muted; untrusted summaries (multi-file,
-        // title-fallback path) never show counts that would only describe
-        // the first diff.
+        // Diffstat / "(N edits)" and the short error reason render only on
+        // the collapsed one-liner: expanded and fullscreen surfaces show
+        // the hunks or the full error body, so their headers stay bare.
+        // Diffstat counts keep their diff colors even when the header is
+        // muted; untrusted summaries (multi-file, title-fallback path)
+        // never show counts that would only describe the first diff.
         let collapsed = matches!(
             surface,
             crate::render::tool_paths::ToolPathSurface::Collapsed
         );
-        let suffix_spans: Vec<Span<'static>> =
+        let mut suffix_spans: Vec<Span<'static>> =
             if collapsed && show_summary && !self.hunks.is_empty() && !self.summary_untrusted {
                 let (ins, del) = self.count_changes();
                 if ins > 0 || del > 0 {
@@ -1023,6 +1028,15 @@ impl EditToolCallBlock {
             } else {
                 Vec::new()
             };
+        // Collapsed only: short reason on the one-liner. Expanded headers
+        // stay path-only; the full message (detail + searched-for string)
+        // lives in the details body.
+        if collapsed && let Some(err) = &self.error {
+            let suffix = super::collapsed_error_suffix(err, 48);
+            if !suffix.is_empty() {
+                suffix_spans.push(Span::styled(suffix, error_style));
+            }
+        }
         let suffix_width: usize = suffix_spans
             .iter()
             .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
@@ -1743,6 +1757,62 @@ mod tests {
         );
         let text: String = header.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "Edit foo.rs (3 edits)");
+    }
+
+    #[test]
+    fn collapsed_failure_shows_basename_and_error_reason() {
+        let abs = "/Users/me/project/src/foo.rs";
+        let err = "No matches found\nThe string to replace was not found in the file.\n\nSearched for:\nfn foo() {}";
+        let block = EditToolCallBlock::new(abs, vec![]).with_error(err);
+        let mut ctx = test_ctx();
+        ctx.mode = DisplayMode::Collapsed;
+        ctx.cwd = Some(std::path::PathBuf::from("/Users/me/project"));
+        let output = block.output(&ctx);
+        let text = line_to_string(&output.lines[0].content);
+        assert_eq!(
+            output.lines[0].content.spans[1].content.as_ref(),
+            "foo.rs",
+            "failed collapsed edit should show basename only, got '{text}'"
+        );
+        assert_eq!(
+            text, "Edit foo.rs — No matches found",
+            "collapsed failure should show the short reason, got '{text}'"
+        );
+        assert!(
+            !text.contains("Searched for"),
+            "collapsed header must not include the expanded body, got '{text}'"
+        );
+    }
+
+    #[test]
+    fn expanded_failure_header_is_path_only_body_has_full_error() {
+        let abs = "/Users/me/project/src/foo.rs";
+        let err = "No matches found\nThe string to replace was not found in the file.\n\nSearched for:\nfn foo() {}";
+        let block = EditToolCallBlock::new(abs, vec![]).with_error(err);
+        let mut ctx = test_ctx();
+        ctx.mode = DisplayMode::Expanded;
+        ctx.cwd = Some(std::path::PathBuf::from("/Users/me/project"));
+        let output = block.output(&ctx);
+        let header = line_to_string(&output.lines[0].content);
+        assert_eq!(
+            header, "Edit src/foo.rs",
+            "expanded failure header should be relative path only, got '{header}'"
+        );
+        let body: String = output
+            .lines
+            .iter()
+            .skip(1)
+            .map(|l| line_to_string(&l.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("No matches found"),
+            "expanded body should include the short label, got '{body}'"
+        );
+        assert!(
+            body.contains("Searched for:\nfn foo() {}"),
+            "expanded body should include the unmatched search string, got '{body}'"
+        );
     }
 
     #[test]

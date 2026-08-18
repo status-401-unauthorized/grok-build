@@ -2534,23 +2534,76 @@ fn extract_raw_field(tc: &acp::ToolCall, field: &str) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
-/// Extract a short, user-friendly error label from a failed Edit tool call.
+/// Build the error text for a failed Edit tool call.
+///
+/// First line is a short label (collapsed header suffix). The rest is shown
+/// only when expanded: the tool's detailed reason (nearest-match hint,
+/// invalid-input explanation, …) plus the `old_string` / `new_string` the
+/// call was trying to apply — those were previously discarded.
 fn extract_edit_error(tc: &acp::ToolCall) -> String {
     use xai_grok_tools::types::output::SearchReplaceOutput;
-    if let Some(ref raw) = tc.raw_output
+    let (label, detail) = if let Some(ref raw) = tc.raw_output
         && let Ok(ToolOutput::SearchReplace(sr)) = serde_json::from_value::<ToolOutput>(raw.clone())
     {
-        return match sr {
-            SearchReplaceOutput::InvalidInput(_) => "Invalid input".to_owned(),
-            SearchReplaceOutput::FileNotFound(_) => "File not found".to_owned(),
-            SearchReplaceOutput::MultipleMatchesFound(_) => "Multiple matches found".to_owned(),
-            SearchReplaceOutput::FileAlreadyExists(_) => "File already exists".to_owned(),
-            SearchReplaceOutput::FilenameTooLong(_) => "Filename too long".to_owned(),
-            SearchReplaceOutput::NoMatchesFound(_) => "No matches found".to_owned(),
-            SearchReplaceOutput::EditsApplied(_) => "Edit failed".to_owned(),
-        };
+        match sr {
+            SearchReplaceOutput::InvalidInput(msg) => ("Invalid input", msg),
+            SearchReplaceOutput::FileNotFound(msg) => ("File not found", msg),
+            SearchReplaceOutput::MultipleMatchesFound(msg) => ("Multiple matches found", msg),
+            SearchReplaceOutput::FileAlreadyExists(msg) => ("File already exists", msg),
+            SearchReplaceOutput::FilenameTooLong(msg) => ("Filename too long", msg),
+            SearchReplaceOutput::NoMatchesFound(e) => ("No matches found", e.message),
+            SearchReplaceOutput::EditsApplied(_) => ("Edit failed", String::new()),
+        }
+    } else {
+        ("Edit failed", content_text(tc))
+    };
+    format_edit_error(label, &detail, tc)
+}
+
+/// Cap a search/replace snippet so a failed Edit's expanded body stays readable.
+fn truncate_edit_snippet(s: &str) -> String {
+    const MAX_LINES: usize = 16;
+    const MAX_CHARS: usize = 2000;
+    let mut out = String::new();
+    let mut truncated = false;
+    for (i, line) in s.lines().enumerate() {
+        if i >= MAX_LINES {
+            truncated = true;
+            break;
+        }
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
     }
-    "Edit failed".to_owned()
+    if out.chars().count() > MAX_CHARS {
+        out = out.chars().take(MAX_CHARS).collect();
+        truncated = true;
+    }
+    if truncated {
+        out.push('…');
+    }
+    out
+}
+
+fn format_edit_error(label: &str, detail: &str, tc: &acp::ToolCall) -> String {
+    let mut out = label.to_string();
+    let detail = detail.trim();
+    if !detail.is_empty() && !detail.eq_ignore_ascii_case(label) {
+        out.push('\n');
+        out.push_str(detail);
+    }
+    let old = extract_raw_field(tc, "old_string").or_else(|| extract_raw_field(tc, "oldString"));
+    let new = extract_raw_field(tc, "new_string").or_else(|| extract_raw_field(tc, "newString"));
+    if let Some(old) = old.filter(|s| !s.is_empty()) {
+        out.push_str("\n\nSearched for:\n");
+        out.push_str(&truncate_edit_snippet(&old));
+    }
+    if let Some(new) = new.filter(|s| !s.is_empty()) {
+        out.push_str("\n\nReplacement:\n");
+        out.push_str(&truncate_edit_snippet(&new));
+    }
+    out
 }
 /// Extract search input metadata from a tool call's rawInput.
 fn extract_search_meta(tc: &acp::ToolCall) -> SearchInputMeta {

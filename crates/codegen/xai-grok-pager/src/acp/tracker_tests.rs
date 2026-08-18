@@ -1747,6 +1747,136 @@ fn errored_edit_does_not_coalesce() {
     .join()
     .unwrap();
 }
+
+fn failed_edit_tool_call(
+    raw_input: serde_json::Value,
+    raw_output: serde_json::Value,
+) -> acp::ToolCall {
+    acp::ToolCall::new(
+        acp::ToolCallId::new(Arc::from("toolu_edit_fail")),
+        "search_replace".to_string(),
+    )
+    .kind(acp::ToolKind::Edit)
+    .status(acp::ToolCallStatus::Failed)
+    .raw_input(Some(raw_input))
+    .raw_output(Some(raw_output))
+    .content(vec![])
+    .locations(vec![])
+}
+
+#[test]
+fn extract_edit_error_includes_search_string_and_detail() {
+    use xai_grok_tools::types::output::{NoMatchesFoundError, SearchReplaceOutput, ToolOutput};
+
+    let raw_output = serde_json::to_value(ToolOutput::SearchReplace(
+        SearchReplaceOutput::NoMatchesFound(NoMatchesFoundError {
+            message: "The string to replace was not found in the file.\n\nNearest match: line 3: fn foo_bar() {}".into(),
+            file_path: "foo.rs".into(),
+            file_snapshot_at_edit: None,
+        }),
+    ))
+    .unwrap();
+    let tc = failed_edit_tool_call(
+        serde_json::json!({
+            "file_path": "foo.rs",
+            "old_string": "fn foo() {}",
+            "new_string": "fn bar() {}",
+        }),
+        raw_output,
+    );
+    let err = extract_edit_error(&tc);
+    assert!(
+        err.starts_with("No matches found"),
+        "collapsed suffix uses the first line, got {err:?}"
+    );
+    assert!(
+        err.contains("Nearest match: line 3: fn foo_bar() {}"),
+        "expanded body should keep the tool's nearest-match hint, got {err:?}"
+    );
+    assert!(
+        err.contains("Searched for:\nfn foo() {}"),
+        "expanded body should show the unmatched old_string, got {err:?}"
+    );
+    assert!(
+        err.contains("Replacement:\nfn bar() {}"),
+        "expanded body should show the intended new_string, got {err:?}"
+    );
+}
+
+#[test]
+fn extract_edit_error_invalid_input_includes_reason_and_camel_case_fields() {
+    use xai_grok_tools::types::output::{SearchReplaceOutput, ToolOutput};
+
+    let raw_output = serde_json::to_value(ToolOutput::SearchReplace(
+        SearchReplaceOutput::InvalidInput("Old string and new string are the same".into()),
+    ))
+    .unwrap();
+    let tc = failed_edit_tool_call(
+        serde_json::json!({
+            "filePath": "foo.rs",
+            "oldString": "same",
+            "newString": "same",
+        }),
+        raw_output,
+    );
+    let err = extract_edit_error(&tc);
+    assert!(err.starts_with("Invalid input"), "got {err:?}");
+    assert!(
+        err.contains("Old string and new string are the same"),
+        "expanded body should include the invalid-input reason, got {err:?}"
+    );
+    assert!(
+        err.contains("Searched for:\nsame"),
+        "camelCase oldString should be picked up, got {err:?}"
+    );
+}
+
+#[test]
+fn failed_edit_block_stores_enriched_error() {
+    use xai_grok_tools::types::output::{NoMatchesFoundError, SearchReplaceOutput, ToolOutput};
+
+    let mut tracker = AcpUpdateTracker::new();
+    let mut sb = ScrollbackState::new();
+    let raw_output = serde_json::to_value(ToolOutput::SearchReplace(
+        SearchReplaceOutput::NoMatchesFound(NoMatchesFoundError {
+            message: "The string to replace was not found in the file".into(),
+            file_path: "foo.rs".into(),
+            file_snapshot_at_edit: None,
+        }),
+    ))
+    .unwrap();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(failed_edit_tool_call(
+            serde_json::json!({
+                "file_path": "foo.rs",
+                "old_string": "needle",
+                "new_string": "hay",
+            }),
+            raw_output,
+        )),
+        &meta(),
+        &mut sb,
+    );
+    let err = edit_block_at(&sb, 0)
+        .error
+        .as_deref()
+        .expect("failed edit stores an error");
+    assert!(err.contains("No matches found"), "got {err:?}");
+    assert!(err.contains("Searched for:\nneedle"), "got {err:?}");
+    assert!(err.contains("Replacement:\nhay"), "got {err:?}");
+}
+
+#[test]
+fn truncate_edit_snippet_caps_long_search_strings() {
+    let long = "line\n".repeat(30);
+    let truncated = truncate_edit_snippet(&long);
+    assert!(
+        truncated.lines().count() <= 17,
+        "16 lines plus an ellipsis marker, got {} lines",
+        truncated.lines().count()
+    );
+    assert!(truncated.ends_with('…'), "got {truncated:?}");
+}
 #[test]
 fn committed_edit_does_not_coalesce() {
     std::thread::spawn(|| {
@@ -4399,18 +4529,15 @@ fn media_gen_ref_skips_uploaded_only_video() {
 fn list_dir_failure_surfaces_typed_error_not_generic() {
     let msg = "Error: Directory does not exist: /proj/.claude/skills";
     let output = ToolOutput::ListDir(ListDirOutput::NotFound(msg.to_string()));
-    let tc = acp::ToolCall::new(
-        acp::ToolCallId::new(Arc::from("list-missing")),
-        "list_dir",
-    )
-    .kind(acp::ToolKind::Other)
-    .status(acp::ToolCallStatus::Failed)
-    .content(vec![])
-    .raw_input(Some(serde_json::json!({
-        "target_directory": "/proj/.claude/skills"
-    })))
-    .raw_output(serde_json::to_value(output).ok())
-    .locations(vec![]);
+    let tc = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("list-missing")), "list_dir")
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Failed)
+        .content(vec![])
+        .raw_input(Some(serde_json::json!({
+            "target_directory": "/proj/.claude/skills"
+        })))
+        .raw_output(serde_json::to_value(output).ok())
+        .locations(vec![]);
     let RenderBlock::ToolCall(ToolCallBlock::ListDir(block)) =
         tool_call_to_block(&tc, Some(Path::new("/proj")))
     else {
