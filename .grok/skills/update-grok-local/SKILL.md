@@ -395,24 +395,29 @@ date”). Do not run `cargo build`. Record
 Exception: rebuild anyway only if the user explicitly requested a rebuild
 regardless of sync result (e.g. “rebuild anyway”, “refresh the binary”).
 
-`grok-local` is expected to point at the debug pager binary in this tree:
+`grok-local` is expected to point at the **release** pager binary in this tree
+(typically via `~/.bash_aliases`):
 
 ```bash
-# Discover alias target if present
+# Discover alias target if present (non-interactive shells may need to
+# source ~/.bash_aliases first)
 alias grok-local 2>/dev/null || true
 type grok-local 2>/dev/null || true
 ```
 
-Default artifact (adjust if the alias differs):
+Expected alias / default artifact:
 
 ```text
-$REPO/target/debug/xai-grok-pager
+alias grok-local='HERDR_AGENT=grok $REPO/target/release/xai-grok-pager'
+$REPO/target/release/xai-grok-pager
 ```
 
-Build:
+Build the **release** profile so the alias target is the binary just linked.
+Do not `cargo build` (debug) and then verify via `grok-local` — that pair
+leaves the release binary stale.
 
 ```bash
-cargo build -p xai-grok-pager-bin
+cargo build --release -p xai-grok-pager-bin
 ```
 
 Use a long timeout (this crate is large; 15–30+ minutes can be normal on cold
@@ -422,13 +427,14 @@ If the build fails:
 
 1. Fix compile errors caused by the merge/adaptation.
 2. Rebuild until success.
-3. Do not claim success without a successful link of `xai-grok-pager`.
+3. Do not claim success without a successful link of
+   `target/release/xai-grok-pager`.
 
-Optional: if `grok-local` is missing from the current shell, define/use the
-explicit path for verification:
+If `grok-local` is missing from the current shell, use the explicit release
+path (do not fall back to `target/debug/`):
 
 ```bash
-HERDR_AGENT=grok "$REPO/target/debug/xai-grok-pager" version
+HERDR_AGENT=grok "$REPO/target/release/xai-grok-pager" version
 ```
 
 ### 7. Verify version string
@@ -463,11 +469,12 @@ EXPECTED=$(grep -E '^version = ' crates/codegen/xai-grok-version/Cargo.toml | he
 SHORT=$(git rev-parse --short HEAD)
 echo "Expected semver: $EXPECTED  short HEAD: $SHORT"
 
-# Prefer alias when available
+# Prefer alias when available (source ~/.bash_aliases if needed).
+# Fallback must be the release binary — same path the alias targets.
 if alias grok-local >/dev/null 2>&1 || command -v grok-local >/dev/null 2>&1; then
   OUT=$(grok-local version 2>&1)
 else
-  OUT=$(HERDR_AGENT=grok ./target/debug/xai-grok-pager version 2>&1)
+  OUT=$(HERDR_AGENT=grok ./target/release/xai-grok-pager version 2>&1)
 fi
 echo "$OUT"
 
@@ -485,7 +492,8 @@ When the rebuild **ran**:
 
 - Still shows an older semver (stale binary / wrong path).
 - Commit hash is an old build’s hash (binary not rebuilt after merge).
-- Binary path is not the one just built (check alias → absolute path).
+- Binary path is not the one just built (check alias →
+  `target/release/xai-grok-pager`, not `target/debug/`).
 
 On fail: confirm alias path, `ls -l` binary mtime, rebuild with
 `cargo clean -p xai-grok-pager-bin` only if incremental link is wrong, then
@@ -586,7 +594,7 @@ PRE_MERGE_HEAD=$(git rev-parse HEAD)
 git merge origin/main   # resolve + analyze if needed
 # If 0 commits merged from upstream: skip cargo build; report existing version
 # Adjacent re-check (pager + spawn/plugin-hooks + turn-index UI + Windows proto-build): git diff --name-only $OLD_ORIGIN..origin/main -- <watch paths>
-cargo build -p xai-grok-pager-bin   # only if this run merged upstream commits
-grok-local version      # or HERDR_AGENT=grok ./target/debug/xai-grok-pager version
+cargo build --release -p xai-grok-pager-bin   # only if this run merged upstream commits
+grok-local version      # or HERDR_AGENT=grok ./target/release/xai-grok-pager version
 # then: re-read this SKILL.md → report skill-review suggestions (or none)
 ```
