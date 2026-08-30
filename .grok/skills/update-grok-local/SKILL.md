@@ -1,39 +1,41 @@
 ---
 name: update-grok-local
 description: >
-  Sync this fork’s main from upstream (origin/main), resolve and analyze merge
-  conflicts for fork-specific changes, rebuild xai-grok-pager only when
-  upstream commits were merged, and verify grok-local version. Use when the
-  user runs /update-grok-local, says “update grok-local”, “sync upstream into
-  fork”, “refresh local grok build”, or wants to pull monorepo main and
-  rebuild the local binary.
+  Sync this fork’s main from the xAI upstream remote (detect by URL, not
+  remote name), resolve and analyze merge conflicts for fork-specific
+  changes, rebuild xai-grok-pager only when upstream commits were merged,
+  and verify grok-local version. Use when the user runs /update-grok-local,
+  says “update grok-local”, “sync upstream into fork”, “refresh local grok
+  build”, or wants to pull monorepo main and rebuild the local binary.
 metadata:
-  short-description: "Sync origin/main → fork; rebuild only if commits merged"
+  short-description: "Sync xAI main → fork; rebuild only if commits merged"
 ---
 
 # /update-grok-local — Sync upstream, preserve fork deltas, rebuild if needed
 
-End-to-end workflow to pull `origin/main` into this fork’s `main`, keep or
-adapt fork-only changes after conflict analysis, rebuild the local binary
-**only when this run merged upstream commits**, confirm `grok-local version`
-(against the just-built binary after a rebuild, or the existing binary when
-the rebuild was skipped), then **review this skill** for vital updates and
-show any suggestions to the user before closing.
+End-to-end workflow to pull the xAI upstream `main` into this fork’s `main`,
+keep or adapt fork-only changes after conflict analysis, rebuild the local
+binary **only when this run merged upstream commits**, confirm
+`grok-local version` (against the just-built binary after a rebuild, or the
+existing binary when the rebuild was skipped), then **review this skill**
+for vital updates and show any suggestions to the user before closing.
 
 ## Preconditions (abort early if unmet)
 
 Run from the **grok-build** repo root (the tree that contains
 `crates/codegen/xai-grok-pager-bin`).
 
-1. Confirm remotes (names may vary — detect, do not hard-fail on labels alone):
-   - **Upstream** (xAI monorepo open source): typically `origin` → `xai-org/grok-build`
-   - **Fork** (user’s remote): typically `fork` → `status-401-unauthorized/grok-build`
+1. Detect remotes **by fetch URL**, not by name (`origin` / `upstream` /
+   `fork` are swapped on some clones):
+   - **Upstream** = remote whose URL contains `xai-org/grok-build`
+   - **Fork** = the other `grok-build` remote (this user’s publish target)
+   Abort if upstream cannot be identified.
 2. Working tree should be clean enough to merge. If dirty:
    - Prefer stashing only if the user did not intentionally leave WIP.
    - If WIP looks intentional, **stop and ask** before discarding or stashing.
-3. Preferred branch: local `main` tracking `fork/main`. If on another branch,
-   tell the user and ask whether to switch to `main` or update the current
-   branch instead.
+3. Preferred branch: local `main` tracking `$FORK_REMOTE/main`. If on another
+   branch, tell the user and ask whether to switch to `main` or update the
+   current branch instead.
 
 Record before any mutation:
 
@@ -42,52 +44,59 @@ git remote -v
 git status -sb
 git rev-parse --abbrev-ref HEAD
 git rev-parse --short HEAD
-git rev-parse --short origin/main 2>/dev/null || true
-git rev-parse --short fork/main 2>/dev/null || true
+
+# Detect remotes by fetch URL. Names vary (this clone: upstream=xAI, origin=fork).
+UPSTREAM_REMOTE=$(git remote -v | awk '/github.com[:/]xai-org\/grok-build/ && /fetch/ {print $1; exit}')
+FORK_REMOTE=$(git remote -v | awk '!/github.com[:/]xai-org\/grok-build/ && /grok-build/ && /fetch/ {print $1; exit}')
+echo "UPSTREAM_REMOTE=${UPSTREAM_REMOTE:-MISSING}  FORK_REMOTE=${FORK_REMOTE:-MISSING}"
+# Abort if UPSTREAM_REMOTE is empty.
+
+git rev-parse --short "${UPSTREAM_REMOTE}/main" 2>/dev/null || true
+git rev-parse --short "${FORK_REMOTE}/main" 2>/dev/null || true
 ```
+
+Use `$UPSTREAM_REMOTE` and `$FORK_REMOTE` for every later fetch, merge,
+compare, and push.
 
 ## Remote / branch model
 
-| Role | Typical remote | Branch |
-|------|----------------|--------|
-| Upstream source of truth | `origin` | `main` |
+| Role | How to detect | Branch |
+|------|---------------|--------|
+| Upstream source of truth | URL contains `xai-org/grok-build` | `main` |
 | Local integration branch | (local) | `main` |
-| Publish target for this fork | `fork` | `main` |
+| Publish target for this fork | the non-xAI `grok-build` remote | `main` |
 
 Merge **upstream into local main**, then (only if user asks or skill is run
-with push intent) update `fork/main`. Default of this skill: **local merge;
-build only if this run merged upstream commits**; do **not** `git push`
-without explicit user approval.
+with push intent) update `$FORK_REMOTE/main`. Default of this skill:
+**local merge; build only if this run merged upstream commits**; do **not**
+`git push` without explicit user approval.
 
 ## Steps
 
 ### 1. Fetch upstream
 
-Record the pre-fetch upstream tip so later steps can isolate **what this sync
-actually brought in** (not “fork tree vs origin tree”):
-
 ```bash
-OLD_ORIGIN=$(git rev-parse origin/main 2>/dev/null || true)
-echo "OLD_ORIGIN=${OLD_ORIGIN:-unset}"
-
-git fetch origin main
+git fetch "$UPSTREAM_REMOTE" main
 # Optional but useful for comparison:
-git fetch fork main
+git fetch "$FORK_REMOTE" main
 ```
 
-Show how far behind:
+Show how far behind the xAI tip:
 
 ```bash
-git log --oneline --left-right --cherry-pick HEAD...origin/main | head -40
-git rev-list --left-right --count HEAD...origin/main
+git log --oneline --left-right --cherry-pick HEAD..."$UPSTREAM_REMOTE/main" | head -40
+git rev-list --left-right --count HEAD..."$UPSTREAM_REMOTE/main"
 ```
 
-If already up to date with `origin/main` (0 commits to merge), skip merge,
-conflict, analysis, **and build**. Jump to **Step 7 (version report)** for the
-existing binary, then **Step 8**. Do **not** rebuild unless the user explicitly
-asked to rebuild anyway.
+If already up to date with `$UPSTREAM_REMOTE/main` (0 commits to merge), skip
+merge, conflict, analysis, **and build**. Jump to **Step 7 (version report)**
+for the existing binary, then **Step 8**. Do **not** rebuild unless the user
+explicitly asked to rebuild anyway.
 
-### 2. Merge origin/main into local main
+A previously fetched but unmerged tip still has commits to merge — do not treat
+“fetch did not move the remote-tracking ref” as “already up to date.”
+
+### 2. Merge upstream main into local main
 
 Ensure on the integration branch (default `main`):
 
@@ -95,13 +104,13 @@ Ensure on the integration branch (default `main`):
 git checkout main
 PRE_MERGE_HEAD=$(git rev-parse HEAD)
 echo "PRE_MERGE_HEAD=$PRE_MERGE_HEAD"
-git merge origin/main
+git merge "$UPSTREAM_REMOTE/main"
 ```
 
 Commit message style used in this repo when wrapping merges:
 
 ```text
-Merge origin/main: sync monorepo into fork; <brief note of preserved fork deltas>
+Merge <upstream-remote>/main: sync monorepo into fork; <brief note of preserved fork deltas>
 ```
 
 If `git merge` reports “Already up to date” (0 commits merged), skip
@@ -141,8 +150,8 @@ This step is mandatory even when Git auto-merged: fork intent must still hold.
 **Identify fork-only work** (commits on local/fork not in upstream):
 
 ```bash
-# Commits on HEAD that are not on origin/main (before merge: use pre-merge tip)
-git log --oneline origin/main..HEAD   # or: merge-base..fork-tip if mid-merge
+# Commits on HEAD that are not on the xAI tip (before merge: use pre-merge tip)
+git log --oneline "$UPSTREAM_REMOTE/main"..HEAD   # or: merge-base..fork-tip if mid-merge
 ```
 
 Also use conflict files + recent merge commit messages (e.g. “keep pager error
@@ -185,7 +194,7 @@ intent unless analysis shows upstream absorbed them:
    `crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs`
    (look for `append_specs` / “merged plugin hooks into session registry at
    spawn”). Upstream still wires plugin hooks mainly on reload; preserve the
-   spawn-time merge unless origin lands an equivalent.
+   spawn-time merge unless upstream lands an equivalent.
 3. **Session turn index UI** — show the 0-based `/session-info` `Turn: N`
    index on (a) plain user-prompt **scrollback bubbles** and (b) the
    **composer** input prefix (`❯ Turn N …`). Plain prompts only (not bash,
@@ -206,16 +215,16 @@ intent unless analysis shows upstream absorbed them:
      next to fork-only `turn_index` (example: `placeholder_when_focused`),
      keep **both** `turn_index` and every new upstream field on the struct,
      `Default` / `inline()` helpers, and every full `PromptStyle { … }`
-     literal. Never take a single side of a field-list conflict — origin-only
+     literal. Never take a single side of a field-list conflict — upstream-only
      drops turn labels; HEAD-only fails to compile when a required field is
      missing.
-   - **Echo-skip loop conflicts:** origin’s `skip_next_user_echo` path in
+   - **Echo-skip loop conflicts:** upstream’s `skip_next_user_echo` path in
      `acp/tracker.rs` still gates `promptIndex` on `block.prompt_index.is_none()`
      and may add sibling backfills in the same loop (example: `replay_ts` →
      `entry.created_at`). Keep fork always-apply `prompt_index` **and** every
-     origin sibling backfill. Never take a single side — origin-only drops
+     upstream sibling backfill. Never take a single side — upstream-only drops
      shell-authoritative turn stamps; HEAD-only drops replay timestamps (or
-     whatever else origin added next to the stamp).
+     whatever else upstream added next to the stamp).
 4. **Windows proto-build / pager stack** — native Windows link of
    `xai-grok-pager-bin`. Three pieces, all required:
    - Skip the in-repo `bin/protoc` DotSlash wrapper (shebang + JSON, not a
@@ -235,11 +244,11 @@ intent unless analysis shows upstream absorbed them:
    `build.rs`, keep the Windows PE skip, temp-file deps, and 8 MiB stack
    **and** every new upstream path. Never take a single side.
 
-**`tracker.rs` test-extract conflicts:** origin owns unit tests in
+**`tracker.rs` test-extract conflicts:** upstream owns unit tests in
 `acp/tracker_tests.rs` (`#[cfg(test)]` + `#[path = "tracker_tests.rs"]
 mod tests;`). If a conflict is inline `mod tests { … }` vs that path
 attribute, **take the extract** and **port** any fork-only tests into
-`tracker_tests.rs`. Do not keep the inline module — the next origin
+`tracker_tests.rs`. Do not keep the inline module — the next upstream
 sync will re-conflict a multi-thousand-line test blob.
 
 **Adjacent re-check (even with a clean merge / no fork-file conflicts):**
@@ -308,33 +317,35 @@ crates/build/xai-proto-build/src/lib.rs
 crates/codegen/xai-grok-pager-bin/build.rs
 ```
 
-How to check (use the **upstream-only** commit range — not
-`PRE_MERGE_HEAD..origin/main`):
+How to check (use the **commits being merged** — not
+`PRE_MERGE_HEAD..$UPSTREAM_REMOTE/main` and not a pre-fetch tip):
 
-`PRE_MERGE_HEAD..origin/main` is a tree comparison. When the fork already
-diverges in `tool/*`, `tracker.rs`, `tracker_tests.rs`, `spawn.rs`,
+`PRE_MERGE_HEAD..$UPSTREAM_REMOTE/main` is a tree comparison. When the fork
+already diverges in `tool/*`, `tracker.rs`, `tracker_tests.rs`, `spawn.rs`,
 turn-index UI paths, or Windows proto-build / pager-bin `build.rs`, those
 paths show up as “changed” even if upstream never touched them this sync.
-Always diff the commits that landed on origin:
+A pre-fetch tip equals the current xAI tip whenever those commits were
+already fetched but not merged — that range is then empty.
+
+Always diff merge-base → xAI tip:
 
 ```bash
-# Prefer OLD_ORIGIN recorded in Step 1 (pre-fetch origin/main tip).
-# Fallback: merge-base of pre-merge HEAD and post-fetch origin/main.
-UPSTREAM_BASE="${OLD_ORIGIN:-$(git merge-base PRE_MERGE_HEAD origin/main)}"
+UPSTREAM_TIP="$UPSTREAM_REMOTE/main"
+UPSTREAM_BASE=$(git merge-base "$PRE_MERGE_HEAD" "$UPSTREAM_TIP")
 
 # Did this upstream sync touch selection/copy-adjacent code?
-git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
+git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
   crates/codegen/xai-grok-pager-render/src/clipboard/ \
   crates/codegen/xai-grok-pager/src/scrollback/ \
   crates/codegen/xai-grok-pager/src/acp/
 
 # Did this upstream sync touch session spawn / plugin-hook wiring?
-git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
+git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
   crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs \
   crates/codegen/xai-grok-shell/src/session/acp_session_impl/
 
 # Did this upstream sync touch turn-index UI (bubble + composer)?
-git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
+git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
   crates/codegen/xai-grok-pager/src/scrollback/blocks/user.rs \
   crates/codegen/xai-grok-pager/src/views/prompt_widget/ \
   crates/codegen/xai-grok-pager/src/app/agent_view/ \
@@ -342,7 +353,7 @@ git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
   crates/codegen/xai-grok-pager-minimal/src/
 
 # Did this upstream sync touch Windows proto-build / pager stack?
-git diff --name-only "${UPSTREAM_BASE}"..origin/main -- \
+git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
   crates/build/xai-proto-build/src/find_protoc.rs \
   crates/build/xai-proto-build/src/lib.rs \
   crates/codegen/xai-grok-pager-bin/build.rs
@@ -455,8 +466,11 @@ crates/codegen/xai-grok-pager-bin/Cargo.toml
 The binary embeds at **compile time** (see `xai-grok-pager-bin/build.rs`):
 
 ```text
-VERSION_WITH_COMMIT = "{CARGO_PKG_VERSION|GROK_VERSION} ({git rev-parse --short HEAD})"
+VERSION_WITH_COMMIT = "{CARGO_PKG_VERSION|GROK_VERSION} ({first 12 hex of git rev-parse HEAD})"
 ```
+
+`git rev-parse --short HEAD` is a prefix of that 12-char stamp and is a valid
+substring check. After a rebuild, prefer matching the 12-char stamp.
 
 Channel suffix (`[stable]`, `[alpha]`, …) comes from runtime update config via
 `xai_grok_update::channel_label()` — do not treat channel mismatch as a version
@@ -467,7 +481,8 @@ Verification:
 ```bash
 EXPECTED=$(grep -E '^version = ' crates/codegen/xai-grok-version/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 SHORT=$(git rev-parse --short HEAD)
-echo "Expected semver: $EXPECTED  short HEAD: $SHORT"
+COMMIT12=$(git rev-parse HEAD | cut -c1-12)
+echo "Expected semver: $EXPECTED  stamp: $COMMIT12  --short: $SHORT"
 
 # Prefer alias when available (source ~/.bash_aliases if needed).
 # Fallback must be the release binary — same path the alias targets.
@@ -478,15 +493,15 @@ else
 fi
 echo "$OUT"
 
-# Pass criteria after a rebuild: output contains EXPECTED and SHORT
-# (commit is baked at build time). After a skipped rebuild, still print
-# OUT vs EXPECTED/SHORT, but do not rebuild to “fix” a mismatch.
-echo "$OUT" | grep -F "$EXPECTED" && echo "$OUT" | grep -F "$SHORT"
+# Pass criteria after a rebuild: output contains EXPECTED and COMMIT12
+# (or SHORT as a prefix of COMMIT12). After a skipped rebuild, still print
+# OUT vs EXPECTED/COMMIT12, but do not rebuild to “fix” a mismatch.
+echo "$OUT" | grep -F "$EXPECTED" && echo "$OUT" | grep -F "$COMMIT12"
 ```
 
 When the rebuild **ran**:
 
-**Pass:** `grok-local version` (or equivalent path) shows `grok $EXPECTED ($SHORT) …`
+**Pass:** `grok-local version` (or equivalent path) shows `grok $EXPECTED ($COMMIT12) …`
 
 **Fail if:**
 
@@ -500,7 +515,7 @@ On fail: confirm alias path, `ls -l` binary mtime, rebuild with
 re-run verification.
 
 When the rebuild was **skipped** (no upstream commits merged): report the
-existing `grok-local version` line vs `$EXPECTED ($SHORT)`. If they differ,
+existing `grok-local version` line vs `$EXPECTED ($COMMIT12)`. If they differ,
 note the mismatch and that the binary was left as-is — do **not** rebuild
 unless the user asks.
 
@@ -521,7 +536,7 @@ next `/update-grok-local` stays accurate.
 
 | Area | Stale if… |
 |------|-----------|
-| Remotes / branches | Remote names or tracking model changed |
+| Remotes / branches | URL-based detection no longer finds xAI vs this fork, or tracking model changed |
 | Package / binary paths | `xai-grok-pager-bin`, artifact path, or `grok-local` wiring changed |
 | Version sources | Semver crate, `build.rs` embed, or channel labeling changed |
 | Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, or Windows proto-build / pager stack, or a new deliberate fork theme appeared |
@@ -549,7 +564,7 @@ next `/update-grok-local` stays accurate.
 
 Summarize for the user:
 
-1. **Sync:** pre/post SHAs (`HEAD`, `origin/main`), commits merged count.
+1. **Sync:** pre/post SHAs (`HEAD`, `$UPSTREAM_REMOTE/main`), commits merged count.
 2. **Conflicts:** files (or “none”), resolution summary.
 3. **Fork analysis:** each delta → keep / adapt / drop + one-line rationale;
    include **adjacent re-check** results when upstream touched clipboard /
@@ -561,15 +576,15 @@ Summarize for the user:
    package `xai-grok-pager-bin`, binary path + mtime (existing binary when
    skipped).
 6. **Version check:** full `grok-local version` line vs expected
-   `$EXPECTED ($SHORT)`. After a skip, report mismatch without rebuilding.
-7. **Next steps (optional):** push to `fork/main` only if user wants:
-   `git push fork main` (require confirmation — shared remote).
+   `$EXPECTED ($COMMIT12)`. After a skip, report mismatch without rebuilding.
+7. **Next steps (optional):** push to `$FORK_REMOTE/main` only if user wants:
+   `git push "$FORK_REMOTE" main` (require confirmation — shared remote).
 8. **Skill review:** “no vital updates” or numbered suggestions (Step 8). Never
    omit this section.
 
 ## Safety rules
 
-- Never force-push to `origin` or `fork` unless the user explicitly requests it.
+- Never force-push to the upstream or fork remotes unless the user explicitly requests it.
 - Never `git reset --hard` or discard uncommitted work without confirmation.
 - Prefer resolving conflicts over aborting; abort only on user request or
   unrecoverable state.
@@ -587,13 +602,13 @@ Summarize for the user:
 
 ```bash
 # Full happy path (agent expands conflict/analysis + skill review as needed)
-OLD_ORIGIN=$(git rev-parse origin/main)
-git fetch origin main
+# UPSTREAM_REMOTE / FORK_REMOTE: detect by URL (see Preconditions)
+git fetch "$UPSTREAM_REMOTE" main
 git checkout main
 PRE_MERGE_HEAD=$(git rev-parse HEAD)
-git merge origin/main   # resolve + analyze if needed
+git merge "$UPSTREAM_REMOTE/main"   # resolve + analyze if needed
 # If 0 commits merged from upstream: skip cargo build; report existing version
-# Adjacent re-check (pager + spawn/plugin-hooks + turn-index UI + Windows proto-build): git diff --name-only $OLD_ORIGIN..origin/main -- <watch paths>
+# Adjacent re-check: git diff --name-only $(git merge-base $PRE_MERGE_HEAD $UPSTREAM_REMOTE/main)..$UPSTREAM_REMOTE/main -- <watch paths>
 cargo build --release -p xai-grok-pager-bin   # only if this run merged upstream commits
 grok-local version      # or HERDR_AGENT=grok ./target/release/xai-grok-pager version
 # then: re-read this SKILL.md → report skill-review suggestions (or none)
