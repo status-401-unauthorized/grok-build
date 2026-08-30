@@ -9,6 +9,9 @@
 #![allow(clippy::items_after_test_module)]
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
+use xai_grok_telemetry::region;
+use xai_grok_telemetry::region::Parent as SpanParent;
+use xai_grok_telemetry::subagent_spawn::phase_region_under;
 /// Partition CLI `--allow` rules under the pin: blanket catch-all allows
 /// (`Allow(Any)` `*` / `**`, plus bare/match-all Bash/MCP/WebFetch grants — see
 /// `resolution::is_catchall_allow`) substitute for the blocked `--yolo`, so drop them when
@@ -60,6 +63,23 @@ fn configured_memory_retrieval_mode(
             Hybrid
         }
         Some(_) => FtsOnly,
+    }
+}
+/// Choose the sampler's own 429 retry threshold for a session's inference path.
+///
+/// Invariant (one layer per role, never stacked, never zero):
+/// subagents pace 429s themselves via the turn-level pacer, so while that pacer
+/// is active (`pacer_max_attempts > 0`) the sampler's own 429 retry is disabled
+/// ([`xai_grok_sampler::RATE_LIMIT_RETRY_DISABLED`]). If the pacer is disabled
+/// (`pacer_max_attempts == 0`) the subagent falls back to the sampler's own 429
+/// retry ([`xai_grok_sampler::RATE_LIMIT_RETRY_THRESHOLD`]) so disabling the
+/// pacer is a true rollback rather than zero 429 handling. Main sessions always
+/// keep the sampler retry.
+fn subagent_sampler_rate_limit_threshold(is_subagent: bool, pacer_max_attempts: u32) -> u32 {
+    if is_subagent && pacer_max_attempts > 0 {
+        xai_grok_sampler::RATE_LIMIT_RETRY_DISABLED
+    } else {
+        xai_grok_sampler::RATE_LIMIT_RETRY_THRESHOLD
     }
 }
 #[cfg(all(test, unix))]
@@ -117,6 +137,40 @@ mod cli_catchall_drop_tests {
         let (kept, dropped) = drop_cli_catchall_allows(rules, None);
         assert_eq!(kept.len(), 3);
         assert!(dropped.is_empty());
+    }
+}
+#[cfg(test)]
+mod subagent_rate_limit_threshold_tests {
+    use super::subagent_sampler_rate_limit_threshold;
+    use xai_grok_sampler::{RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD};
+    #[test]
+    fn main_session_always_keeps_sampler_retry() {
+        assert_eq!(
+            subagent_sampler_rate_limit_threshold(false, 0),
+            RATE_LIMIT_RETRY_THRESHOLD
+        );
+        assert_eq!(
+            subagent_sampler_rate_limit_threshold(false, 8),
+            RATE_LIMIT_RETRY_THRESHOLD
+        );
+    }
+    #[test]
+    fn subagent_with_disabled_pacer_falls_back_to_sampler_retry() {
+        assert_eq!(
+            subagent_sampler_rate_limit_threshold(true, 0),
+            RATE_LIMIT_RETRY_THRESHOLD
+        );
+    }
+    #[test]
+    fn subagent_with_active_pacer_disables_sampler_retry() {
+        assert_eq!(
+            subagent_sampler_rate_limit_threshold(true, 1),
+            RATE_LIMIT_RETRY_DISABLED
+        );
+        assert_eq!(
+            subagent_sampler_rate_limit_threshold(true, 8),
+            RATE_LIMIT_RETRY_DISABLED
+        );
     }
 }
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
@@ -201,12 +255,14 @@ pub(crate) async fn spawn_session_actor(
     session_client_identifier: Option<String>,
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
+    subagent_rate_limit_max_attempts: u32,
     web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
-    app_builder_deployer_config: xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
+    app_builder_deployer_config: xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig,
     write_file_enabled: bool,
+    active_agent_messages_enabled: bool,
     goal_enabled: bool,
     background_workflows_enabled: bool,
     subagents_enabled: bool,
@@ -247,6 +303,8 @@ pub(crate) async fn spawn_session_actor(
     max_turns: Option<usize>,
     forked_tool_override: Option<Vec<ToolSpec>>,
     is_chat_kind: bool,
+    spawn_ctx: Option<xai_grok_telemetry::subagent_spawn::SpawnPhaseContext>,
+    sampling_gate: Option<Arc<tokio::sync::Semaphore>>,
 ) -> Result<
     (
         SessionHandle,
@@ -261,6 +319,7 @@ pub(crate) async fn spawn_session_actor(
             "max_turns must be greater than 0".to_string(),
         ));
     }
+    let wf_sid: String = session_info.id.0.to_string();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     tracing::info!(
         "Session '{}' created with {} MCP servers",
@@ -319,6 +378,11 @@ pub(crate) async fn spawn_session_actor(
                 }
             }
         }
+        xai_grok_workspace::permission::resolution::apply_permission_mode_hint(
+            &mut permission_config,
+            startup_hints.permission_mode.as_deref(),
+            yolo_pin,
+        );
         let deny_read_globs = permission_config
             .as_ref()
             .map(xai_grok_workspace::permission::resolution::deny_read_globs_from_config)
@@ -528,6 +592,7 @@ pub(crate) async fn spawn_session_actor(
         notifications_suppressed: false,
         rewindable: false,
         front_message_committed: false,
+        hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
     });
     let mcp_strategy = startup_hints.resolve_mcp_strategy();
@@ -742,22 +807,26 @@ pub(crate) async fn spawn_session_actor(
         {
             let gc_storage = storage.clone();
             let gc_max_age = memory_config.as_ref().map_or(30, |mc| mc.gc.max_age_days);
-            tokio::task::spawn_blocking(move || match gc_storage.gc(gc_max_age) {
-                Ok(removed) if removed > 0 => {
-                    tracing::info!(
-                        target: xai_grok_telemetry::memory_log::TARGET,
-                        removed,
-                        "MEMORY_GC: cleaned orphaned workspace directories"
-                    );
+            let gc_span = region!(debug, "memory.gc", SpanParent::Root);
+            tokio::task::spawn_blocking(move || {
+                let _gc_span = gc_span;
+                match gc_storage.gc(gc_max_age) {
+                    Ok(removed) if removed > 0 => {
+                        tracing::info!(
+                            target: xai_grok_telemetry::memory_log::TARGET,
+                            removed,
+                            "MEMORY_GC: cleaned orphaned workspace directories"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            target: xai_grok_telemetry::memory_log::TARGET,
+                            error = %e,
+                            "MEMORY_GC: failed"
+                        );
+                    }
+                    _ => {}
                 }
-                Err(e) => {
-                    tracing::debug!(
-                        target: xai_grok_telemetry::memory_log::TARGET,
-                        error = %e,
-                        "MEMORY_GC: failed"
-                    );
-                }
-                _ => {}
             });
         }
         let watcher_config = memory_config
@@ -912,6 +981,7 @@ pub(crate) async fn spawn_session_actor(
         app_builder_deployer_config: app_builder_deployer_config.clone(),
         media_gen_batch_limits,
         write_file_enabled,
+        active_agent_messages_enabled,
         subagents_enabled,
         subagent_toggle: subagent_toggle.clone(),
         background_workflows_enabled,
@@ -930,6 +1000,7 @@ pub(crate) async fn spawn_session_actor(
         attribution_callback: attribution_callback_for_spec,
         tool_params_json: tool_params_json.clone(),
         subagent_event_tx: tool_context.subagent_event_tx.clone(),
+        subagent_coordinator_sender: tool_context.subagent_coordinator_sender.clone(),
         monitor_event_buffer: tool_context.monitor_event_buffer.clone(),
         user_question_tx: user_question_tx.clone(),
         subagent_depth: tool_context.subagent_depth,
@@ -950,7 +1021,12 @@ pub(crate) async fn spawn_session_actor(
             None
         },
     });
-    let agent = rebuild_spec
+    use xai_grok_telemetry::subagent_spawn::SubagentSpawnPhase;
+    let builder_started_at = std::time::Instant::now();
+    let agent_build_span = spawn_ctx
+        .as_ref()
+        .map(|ctx| phase_region_under(SubagentSpawnPhase::AgentBuild, &ctx.parent));
+    let (agent, agent_build_elapsed) = rebuild_spec
         .build_agent_with_initial_overrides(
             agent_definition,
             persisted_announcement_state
@@ -968,13 +1044,17 @@ pub(crate) async fn spawn_session_actor(
             );
             e
         })?;
+    drop(agent_build_span);
+    let tool_setup_span = spawn_ctx
+        .as_ref()
+        .map(|ctx| phase_region_under(SubagentSpawnPhase::ToolSetup, &ctx.parent));
+    let reservations_for_bridge = task_completion_reservations.clone();
     agent
         .tool_bridge()
-        .update_resource(task_completion_reservations.clone())
-        .await;
-    agent
-        .tool_bridge()
-        .update_resource(task_wake_suppressed)
+        .update_resources_with(|resources| {
+            resources.insert(reservations_for_bridge);
+            resources.insert(task_wake_suppressed);
+        })
         .await;
     let memory_retrieval_mode = configured_memory_retrieval_mode(memory_config.as_ref());
     let harness_metrics = if !startup_hints.is_subagent
@@ -1028,11 +1108,17 @@ pub(crate) async fn spawn_session_actor(
     let resolved_read =
         xai_grok_tools::reminders::task_completion::resolve_read_tool_name(agent.tool_bridge())
             .await;
+    let resolved_scheduler_delete =
+        xai_grok_tools::reminders::task_completion::resolve_scheduler_delete_tool_name(
+            agent.tool_bridge(),
+        )
+        .await;
     let _ = task_output_tool_name.set(resolved_task_output.clone());
     let _ = read_tool_name.set(resolved_read);
     tool_context.task_output_tool_name = resolved_task_output.unwrap_or_else(|| {
         xai_grok_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string()
     });
+    tool_context.scheduler_delete_tool_name = resolved_scheduler_delete;
     let scheduler_handle_for_handle = {
         let toolset = agent.tool_bridge().toolset();
         let res = toolset.resources.lock().await;
@@ -1048,6 +1134,18 @@ pub(crate) async fn spawn_session_actor(
     ) {
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
+    if let Some(ctx) = &spawn_ctx {
+        ctx.timer
+            .record(SubagentSpawnPhase::AgentBuild, agent_build_elapsed);
+        ctx.timer.record(
+            SubagentSpawnPhase::ToolSetup,
+            builder_started_at
+                .elapsed()
+                .saturating_sub(agent_build_elapsed),
+        );
+    }
+    drop(tool_setup_span);
+    crate::waterfall::mark(&wf_sid, crate::waterfall::stage::SB_AGENT_BUILT);
     let system_prompt = agent.system_prompt().to_string();
     let mut prompt_context = agent.prompt_context().clone();
     prompt_context.normalize_for_persistence();
@@ -1188,7 +1286,10 @@ pub(crate) async fn spawn_session_actor(
     }
     let sampler_retry_policy = xai_grok_sampler::RetryPolicy {
         max_retries: max_retries.unwrap_or(5),
-        rate_limit_retry_threshold: 2,
+        rate_limit_retry_threshold: subagent_sampler_rate_limit_threshold(
+            is_subagent_spawn,
+            subagent_rate_limit_max_attempts,
+        ),
         retry_only_before_output,
     };
     let (sampler_event_tx, sampler_event_rx) =
@@ -1366,51 +1467,28 @@ pub(crate) async fn spawn_session_actor(
                     });
                     continue;
                 }
-                if input.resume_from_run_id.is_some()
-                    && (input.name.is_some()
-                        || input.script.is_some()
-                        || input.script_path.is_some())
-                {
-                    let _ = ack
-                        .send(WorkflowLaunchAck::Rejected {
-                            code: "workflow_invalid_source",
-                            detail: "resume uses the original immutable script and args; launch edited source as a new run"
-                                .into(),
-                        });
-                    continue;
-                }
                 let registry_snapshot = registry::WorkflowRegistry::scan(Some(&launch_cwd));
-                let resolved = if let Some(name) = input.name.as_deref() {
-                    registry_snapshot.resolve_by_name(name)
-                } else if let Some(script) = input.script.clone() {
-                    registry::resolve_inline(script)
-                } else if let Some(path) = input.script_path.as_deref() {
-                    registry::resolve_by_path(
-                        std::path::Path::new(path),
+                use xai_grok_tools::implementations::grok_build::workflow::WorkflowSource;
+                let resolved = match &input.source {
+                    WorkflowSource::Name { name } => registry_snapshot.resolve_by_name(name),
+                    WorkflowSource::Script { script } => registry::resolve_inline(script.clone()),
+                    WorkflowSource::ScriptPath { script_path } => registry::resolve_by_path(
+                        std::path::Path::new(script_path),
                         &launch_cwd,
                         Some(&launch_session_dir),
-                    )
-                } else if input.resume_from_run_id.is_some() {
-                    match manager
-                        .lock()
-                        .await
-                        .script_copy_for(input.resume_from_run_id.as_deref().unwrap())
-                    {
-                        Some(script) => registry::resolve_inline(script),
-                        None => {
-                            let _ = ack.send(WorkflowLaunchAck::Rejected {
-                                code: "workflow_resume_unknown_run",
-                                detail: "no persisted script for that run id".into(),
-                            });
-                            continue;
+                    ),
+                    WorkflowSource::Resume { resume_from_run_id } => {
+                        match manager.lock().await.script_copy_for(resume_from_run_id) {
+                            Some(script) => registry::resolve_inline(script),
+                            None => {
+                                let _ = ack.send(WorkflowLaunchAck::Rejected {
+                                    code: "workflow_resume_unknown_run",
+                                    detail: "no persisted script for that run id".into(),
+                                });
+                                continue;
+                            }
                         }
                     }
-                } else {
-                    let _ = ack.send(WorkflowLaunchAck::Rejected {
-                        code: "workflow_invalid_source",
-                        detail: "provide one of name / script / script_path".into(),
-                    });
-                    continue;
                 };
                 let resolved = match resolved {
                     Ok(r) => r,
@@ -1458,10 +1536,15 @@ pub(crate) async fn spawn_session_actor(
                     continue;
                 }
                 let definition_name = resolved.meta.name.clone();
-                let args = match (&input.args, &input.resume_from_run_id) {
-                    (Some(a), _) => a.clone(),
-                    (None, Some(rid)) => manager.lock().await.args_copy_for(rid),
-                    (None, None) => serde_json::Value::Null,
+                let resume_run_id = match &input.source {
+                    WorkflowSource::Resume { resume_from_run_id } => {
+                        Some(resume_from_run_id.clone())
+                    }
+                    _ => None,
+                };
+                let args = match &resume_run_id {
+                    Some(rid) => manager.lock().await.args_copy_for(rid),
+                    None => input.args.clone().unwrap_or(serde_json::Value::Null),
                 };
                 let objective = args
                     .get("objective")
@@ -1472,7 +1555,8 @@ pub(crate) async fn spawn_session_actor(
                     objective,
                     args,
                     agent_budget: input.agent_budget,
-                    resume_run_id: input.resume_from_run_id.clone(),
+                    effort: None,
+                    resume_run_id,
                 };
                 let launch_outcome = {
                     let mut mgr = manager.lock().await;
@@ -1574,6 +1658,14 @@ pub(crate) async fn spawn_session_actor(
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         status_wake: Default::default(),
         session_info: session_info.clone(),
+        transient_retry_enabled: !startup_hints.is_subagent
+            && crate::util::config::resolve_turn_transient_retry(
+                remote_settings
+                    .as_ref()
+                    .and_then(|r| r.turn_transient_retry),
+            ),
+        transient_retries_prompt_total: std::cell::Cell::new(0),
+        transient_episode_start: std::cell::Cell::new(None),
         auth_method_id,
         model_auth_memo: std::cell::RefCell::new(None),
         attribution_callback,
@@ -1607,7 +1699,9 @@ pub(crate) async fn spawn_session_actor(
         file_state_tracker,
         rewind_pending_prompt: std::sync::Mutex::new(None),
         delivery_tools: std::cell::RefCell::new(startup_hints.delivery_tools.clone()),
-        attach_non_interactive: std::cell::Cell::new(startup_hints.non_interactive),
+        attach_non_interactive: std::rc::Rc::new(std::cell::Cell::new(
+            startup_hints.non_interactive,
+        )),
         startup_hints,
         forked_tool_override,
         compaction: super::compaction_config::CompactionConfig {
@@ -1660,6 +1754,7 @@ pub(crate) async fn spawn_session_actor(
         inference_idle_timeout: Duration::from_secs(inference_idle_timeout_secs),
         max_turns,
         max_retries: xai_grok_sampler::resolve_max_retries(max_retries),
+        rate_limit_waits: RateLimitWaitConfig::with_max_attempts(subagent_rate_limit_max_attempts),
         pending_interjections: InterjectionBuffer::new(),
         pending_skill_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: memory_config
@@ -1737,14 +1832,9 @@ pub(crate) async fn spawn_session_actor(
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle,
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
-        mcp_announced_servers: Mutex::new(
+        mcp_announcements: Mutex::new(
             persisted_announcement_state
-                .as_ref()
-                .map(|s| {
-                    crate::session::announcement_state::from_persisted_fingerprints(
-                        &s.mcp_server_fingerprints,
-                    )
-                })
+                .map(crate::session::announcement_state::McpAnnounced::from_persisted)
                 .unwrap_or_default(),
         ),
         mcp_reminder_mode: McpReminderMode::from_env(),
@@ -1795,9 +1885,11 @@ pub(crate) async fn spawn_session_actor(
         next_title_refresh_idx: std::cell::Cell::new(initial_title_refresh_idx),
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
-        turn_stream_drained: parking_lot::Mutex::new(None),
-        pending_image_strip: parking_lot::Mutex::new(None),
+        turn_stream_drained: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        pending_image_strip: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        image_strip_rewrite_barrier: ImageStripRewriteBarrier::new(),
         sampler_handle,
+        sampling_gate,
         rebuild_spec: rebuild_spec.clone(),
         image_description_model,
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
@@ -2105,7 +2197,9 @@ pub(crate) async fn spawn_session_actor(
             xai_grok_telemetry::session_ctx::log_event_dual(telemetry_enabled, ev);
         });
     }
+    let hosting = xai_grok_telemetry::activity::SESSIONS_ACTIVE.enter();
     tokio::task::spawn_local(async move {
+        let _hosting = hosting;
         xai_grok_telemetry::session_ctx::with_session_ctx(
             telemetry_ctx,
             run_session(
@@ -2202,6 +2296,7 @@ struct SessionInitResult {
 /// (`SessionHandle`, `permission_events_rx`, `system_prompt`) are sent back to the
 /// caller via a oneshot channel.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) async fn spawn_session_on_thread(
     session_info: SessionInfo,
     gateway: GatewaySender,
@@ -2267,12 +2362,14 @@ pub(crate) async fn spawn_session_on_thread(
     session_client_identifier: Option<String>,
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
+    subagent_rate_limit_max_attempts: u32,
     web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
-    app_builder_deployer_config: xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
+    app_builder_deployer_config: xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig,
     write_file_enabled: bool,
+    active_agent_messages_enabled: bool,
     goal_enabled: bool,
     background_workflows_enabled: bool,
     subagents_enabled: bool,
@@ -2314,6 +2411,8 @@ pub(crate) async fn spawn_session_on_thread(
     max_turns: Option<usize>,
     forked_tool_override: Option<Vec<ToolSpec>>,
     is_chat_kind: bool,
+    spawn_ctx: Option<xai_grok_telemetry::subagent_spawn::SpawnPhaseContext>,
+    sampling_gate: Option<Arc<tokio::sync::Semaphore>>,
 ) -> Result<
     (
         SessionHandle,
@@ -2366,7 +2465,7 @@ pub(crate) async fn spawn_session_on_thread(
                 }
             };
             let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, async move {
+            let actor_main = async move {
                 let _trace_span = parent_traceparent.as_ref().map(|tp| {
                     let meta = serde_json::json!({ "traceparent": tp })
                         .as_object()
@@ -2443,12 +2542,14 @@ pub(crate) async fn spawn_session_on_thread(
                         session_client_identifier,
                         inference_idle_timeout_secs,
                         max_retries,
+                        subagent_rate_limit_max_attempts,
                         web_search_sampling_config,
                         web_fetch_config,
                         image_gen_config,
                         video_gen_config,
                         app_builder_deployer_config,
                         write_file_enabled,
+                        active_agent_messages_enabled,
                         goal_enabled,
                         background_workflows_enabled,
                         subagents_enabled,
@@ -2485,6 +2586,8 @@ pub(crate) async fn spawn_session_on_thread(
                         max_turns,
                         forked_tool_override,
                         is_chat_kind,
+                        spawn_ctx,
+                        sampling_gate,
                     )
                     .await
                     {
@@ -2500,7 +2603,9 @@ pub(crate) async fn spawn_session_on_thread(
                     system_prompt,
                 }));
                 let _ = session_done_rx.await;
-            });
+            };
+            local.block_on(&rt, actor_main);
+            rt.block_on(xai_grok_telemetry::session_ctx::drain_at_session_exit());
         });
     let join_handle = match join_handle {
         Ok(h) => h,
@@ -2558,6 +2663,7 @@ impl SessionRestartActions {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::session::mcp_restart::RestartActions for SessionRestartActions {
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn is_stdio_server_configured(&self, server: &str) -> bool {
         self.session.is_stdio_server_configured(server).await
     }
@@ -2567,12 +2673,15 @@ impl crate::session::mcp_restart::RestartActions for SessionRestartActions {
             .unwrap_or_else(|e| e.into_inner())
             .is_shutting_down(server)
     }
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
         self.session.respawn_stdio(server).await
     }
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn is_http_server_configured(&self, server: &str) -> bool {
         self.session.is_http_server_configured(server).await
     }
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn reset_http_client(&self, server: &str) -> Result<(), String> {
         self.session.reset_http_client(server).await
     }

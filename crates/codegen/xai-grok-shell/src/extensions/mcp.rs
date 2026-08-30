@@ -50,7 +50,7 @@ pub mod mcp_methods {
     pub const INIT_PROGRESS: &str = "x.ai/mcp/init_progress";
 }
 use crate::agent::MvpAgent;
-use crate::session::mcp_servers::{MCP_TOOL_NAME_DELIMITER, McpClient, McpServerName, McpState};
+use crate::session::mcp_servers::{MCP_TOOL_NAME_DELIMITER, McpClient, McpState};
 
 // ── Wire types: mcp/list ────────────────────────────────────────────
 
@@ -769,13 +769,12 @@ pub(crate) async fn init_agent_mcp_pool(
     }
 
     let noop = xai_grok_session_events::EventWriter::noop();
-    // session_less picks Interactive to preserve prior deferred-OAuth behavior. A session-less SDK
-    // agent can reach this non-interactively; threading real non-interactivity is a deliberate follow-up.
-    let ctx = crate::session::mcp_servers::McpSpawnCtx::session_less(&noop);
+    let ctx = crate::session::mcp_servers::McpSpawnCtx::standalone(&noop)
+        .with_oauth_discovery(crate::session::mcp_servers::McpOauthDiscovery::Network);
     let meta = Default::default();
     let oauth = Default::default();
     let results = start_mcp_servers(configs, Some(cwd), &meta, &oauth, &ctx).await;
-    let clients: HashMap<McpServerName, Arc<McpClient>> = results
+    let clients: xai_grok_mcp::owned_clients::OwnedClients = results
         .into_iter()
         .filter_map(|r| match r {
             Ok(client) => {

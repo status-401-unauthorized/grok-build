@@ -1,9 +1,9 @@
-//! Frame rendering for [`AgentView`]: the `draw` entry point plus shortcut
-//! hints and the subagent fullscreen view.
+//! Frame rendering for [`AgentView`]: the `draw` entry point plus shortcut hints and the subagent fullscreen view.
 use super::{
     ActivePane, AgentPane, AgentView, AgentViewLayout, BlockingCard, CtaPhase, EscStep,
     InlineMediaHitAreas, KeyOwner, MODE_BANNER_FADE_TICKS, PromptMode, collect_citation_links,
-    dropdown_items_width, record_dot_pulse, render_dropdown_chrome, supports_osc22,
+    dropdown_content_inset, dropdown_items_width, record_dot_pulse, render_dropdown_chrome,
+    supports_osc22,
 };
 use crate::actions::{ActionId, ActionRegistry};
 use crate::key;
@@ -32,26 +32,20 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::HashSet;
 use std::time::Instant;
-/// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent
-/// view cannot see itself (the voice pipeline, app-level Esc ownership, the
-/// status row).
-/// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
-/// fact extends this struct instead of every `draw` call site; tests take
-/// `Default` and override only what they exercise.
+/// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent view cannot see itself (voice pipeline, Esc ownership, status row).
+/// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render fact extends this struct instead of every `draw` call site.
+/// Tests take `Default` and override only what they exercise.
 #[derive(Default)]
 pub struct AppRenderParams<'a> {
     /// Voice feature available (shows the mic affordances).
     pub voice_available: bool,
-    /// Mic open and streaming on the active surface — drives the recording
-    /// row and the prompt voice overlay.
+    /// Mic open and streaming on the active surface; drives the recording row and the prompt voice overlay.
     pub voice_listening: bool,
     /// Interim transcript for the prompt overlay while dictating.
     pub voice_interim: Option<&'a str>,
-    /// App-level Esc ownership snapshot — single producer
-    /// `AppView::esc_owned_before_agent` (voice listening / cold-start,
-    /// focused dev tracing pane, cloud / import-Claude modals, dashboard
-    /// attached-agent popup). Feeds the hint path so the bar never
-    /// advertises `Esc cancel` while an app-level owner would consume it.
+    /// App-level Esc ownership snapshot; the single producer is `AppView::esc_owned_before_agent`.
+    /// Owners: voice listening / cold-start, a focused dev tracing pane, the cloud / import-Claude modals, the dashboard attached-agent popup.
+    /// Feeds the hint path so the bar never advertises `Esc cancel` while an app-level owner would consume it.
     pub esc_owned_before_agent: bool,
     /// The status row this frame paints, or `Off` when this frame has none.
     pub status_line: crate::views::status_line::StatusLineFrame,
@@ -60,8 +54,7 @@ pub struct AppRenderParams<'a> {
 enum ShortcutsBarContent {
     /// A blocking surface's own keys, rendered as given.
     Surface(Vec<HintItem>),
-    /// The focused pane's keys, trimmed to the compact bar with the
-    /// cheatsheet hint appended.
+    /// The focused pane's keys, trimmed to the compact bar with the cheatsheet hint appended.
     Pane(Vec<HintItem>),
     /// Nothing: the row belongs to a surface that paints it itself.
     Hidden,
@@ -79,8 +72,7 @@ impl AgentView {
         self.update_scrollback_selection_state(Default::default(), Default::default());
     }
     /// Keep [`Self::timeline_hover_preview`] in sync with [`Self::timeline_hover`].
-    /// Called when hover changes (mouse Moved or rail rebuild under a
-    /// stationary pointer) so render can borrow the cached text.
+    /// Called when hover changes (mouse Moved or rail rebuild under a stationary pointer) so render can borrow the cached text.
     pub(crate) fn sync_timeline_hover_preview(&mut self) {
         match self.timeline_hover {
             Some(crate::views::timeline::TimelineHit::Tick(turn_idx)) => {
@@ -99,8 +91,7 @@ impl AgentView {
             _ => self.timeline_hover_preview = None,
         }
     }
-    /// Open the fullscreen subagent view for `child_sid`, replaying child
-    /// `updates.jsonl` when scrollback only has the injected task prompt.
+    /// Open the fullscreen subagent view for `child_sid`, replaying child `updates.jsonl` when scrollback only has the injected task prompt.
     pub(crate) fn open_subagent_fullscreen(&mut self, child_sid: String) {
         if let Some(child) = self.subagent_views.get_mut(&child_sid) {
             child.mark_as_subagent_view();
@@ -110,22 +101,34 @@ impl AgentView {
         if self.active_subagent.as_deref() != Some(child_sid.as_str()) {
             self.close_subagent_fullscreen();
         }
-        crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
+        let replay_outcome = crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
+        tracing::debug!(child_sid = %child_sid, ?replay_outcome, "opened subagent fullscreen");
         self.active_subagent = Some(child_sid);
     }
-    /// Close the fullscreen subagent takeover (if any), evicting the closed
-    /// child when finished (see [`crate::app::subagent::evict_finished_child_view`]
-    /// for rationale and guards). All close sites route through here.
+    /// Close the fullscreen subagent takeover (if any), evicting the closed child when finished.
+    /// See [`crate::app::subagent::evict_finished_child_view`] for rationale and guards.
+    /// All close sites route through here.
     pub(crate) fn close_subagent_fullscreen(&mut self) {
         if let Some(child_sid) = self.active_subagent.take() {
-            crate::app::subagent::evict_finished_child_view(self, &child_sid);
+            let _ = crate::app::subagent::evict_finished_child_view(self, &child_sid);
         }
+    }
+    /// Fetch a child view for applying a live update, hydrating a resumed child's inherited transcript first.
+    /// The incoming block then never closes the replay window (see [`crate::app::subagent::replay_resumed_child_before_live_block`]).
+    /// The funnel for every apply that can be a resumed child's *first* live block: the ACP and xAI child ingresses and the finish-path finalize.
+    /// Reads and precedence-exempt writers use the field directly.
+    /// Those are background task blocks and tool-call argument deltas, each transitively preceded by a funneled block.
+    pub(crate) fn child_view_for_live_update_mut(
+        &mut self,
+        child_sid: &str,
+    ) -> Option<&mut AgentView> {
+        crate::app::subagent::replay_resumed_child_before_live_block(self, child_sid);
+        self.subagent_views.get_mut(child_sid).map(|v| &mut **v)
     }
     /// Shortcut hints for the plan-approval prompt/comment focus states.
     ///
-    /// Shared by `draw` and the cheatsheet Current section. `Tab:plan` is
-    /// omitted when there is nothing to open (empty approval and no line
-    /// viewer) so the footer never advertises a dead key.
+    /// Shared by `draw` and the cheatsheet Current section.
+    /// `Tab:plan` is omitted when there is nothing to open (empty approval and no line viewer) so the footer never advertises a dead key.
     fn plan_approval_shortcut_hints(
         &self,
         pav: &crate::views::plan_approval_view::PlanApprovalViewState,
@@ -181,8 +184,7 @@ impl AgentView {
         self.prompt
             .desired_height(question_text_w, style, false, cap)
     }
-    /// The `Esc` hint for the focused card, named by the rung the key actually
-    /// takes ([`EscStep`]).
+    /// The `Esc` hint for the focused card, named by the rung the key actually takes ([`EscStep`]).
     fn card_esc_hint(&self) -> HintItem {
         HintItem::new(key!(Esc), self.card_esc().map_or("back", EscStep::label))
     }
@@ -202,10 +204,14 @@ impl AgentView {
                     esc,
                 ]
             }
-            QuestionFocus::InputMode if qv.is_feedback() => {
+            QuestionFocus::InputMode if qv.is_feedback_report() => {
                 vec![HintItem::new(key!(Enter), "send"), esc]
             }
             QuestionFocus::InputMode => vec![HintItem::new(key!(Enter), "submit"), esc],
+            QuestionFocus::Navigation if qv.is_feedback_trace() => vec![esc],
+            QuestionFocus::Navigation if qv.is_prompt_blocked() => {
+                vec![HintItem::new(key!(Tab), "next answer"), esc]
+            }
             QuestionFocus::Navigation => {
                 vec![
                     HintItem::new(key!(Tab), "next answer"),
@@ -272,20 +278,14 @@ impl AgentView {
     }
     /// Returns the *exact* hints the bottom shortcuts bar would render right now.
     ///
-    /// Single source of truth for context-sensitive shortcuts (pane, overlays,
-    /// sub-modes, selection state, turn running, plan/queue). Both the bar
-    /// renderer and the Ctrl+. cheatsheet Current section delegate here, so
-    /// they are guaranteed identical and every shortcut makes sense in the
-    /// active context.
+    /// Single source of truth for context-sensitive shortcuts (pane, overlays, sub-modes, selection state, turn running, plan/queue).
+    /// Both the bar renderer and the Ctrl+. cheatsheet Current section delegate here, so the two stay identical in the active context.
     ///
-    /// Known transient: when a subagent is fullscreen (`active_subagent.is_some()`),
-    /// draw returns early and the child renders its own bar; Current on the parent
-    /// still reflects parent context (documented limitation, pre-existing before
-    /// this change).
+    /// Known transient: when a subagent is fullscreen (`active_subagent.is_some()`), draw returns early and the child renders its own bar.
+    /// Current on the parent then still reflects parent context.
     ///
-    /// `esc_owned_before_agent`: app-level Esc ownership snapshot
-    /// (`AppView::esc_owned_before_agent`); the draw path passes its param
-    /// of the same name.
+    /// `esc_owned_before_agent`: app-level Esc ownership snapshot (`AppView::esc_owned_before_agent`).
+    /// The draw path passes its param of the same name.
     pub fn current_shortcut_hints(
         &self,
         registry: &ActionRegistry,
@@ -307,8 +307,7 @@ impl AgentView {
             ShortcutsBarContent::Surface(hints)
         }
     }
-    /// The bar names the surface the keys actually reach, so it asks
-    /// [`AgentView::key_owner`] rather than keeping an order of its own.
+    /// The bar names the surface the keys actually reach, so it asks [`AgentView::key_owner`] rather than keeping an order of its own.
     fn shortcuts_bar_content(
         &self,
         registry: &ActionRegistry,
@@ -345,15 +344,20 @@ impl AgentView {
                     .map(|qv| self.question_shortcut_hints(qv))
                     .unwrap_or_default(),
             ),
+            KeyOwner::Card(BlockingCard::McpElicitation) => ShortcutsBarContent::Surface(vec![
+                HintItem::new(key!(Enter), "accept / toggle"),
+                HintItem::new(key!('d'), "decline"),
+                HintItem::new(key!('c', CONTROL), "cancel"),
+                HintItem::new(key!(Tab), "next field"),
+                self.card_esc_hint(),
+            ]),
             KeyOwner::Pane => {
                 ShortcutsBarContent::Pane(self.normal_pane_hints(registry, esc_owned_before_agent))
             }
         }
     }
-    /// An open line viewer paints its own hints over this row further down
-    /// `draw`, so the bar is silent — except in the two states where the
-    /// viewer defers: the plan-approval prompt, whose keys the viewer's
-    /// intercept forwards, and a casual comment draft.
+    /// An open line viewer paints its own hints over this row further down `draw`, so the bar is silent.
+    /// The two exceptions, where the viewer defers: the plan-approval prompt, whose keys the viewer's intercept forwards, and a casual comment draft.
     fn line_viewer_bar(&self) -> ShortcutsBarContent {
         use crate::views::shortcuts_bar::HintItem;
         if let Some(pav) = self
@@ -371,9 +375,8 @@ impl AgentView {
         }
         ShortcutsBarContent::Hidden
     }
-    /// Shared "normal pane" hints: flag computation + `build_hints` + queue hint.
-    /// Single source of truth for the two former duplicated blocks in
-    /// `current_shortcut_hints` and `draw`.
+    /// Shared "normal pane" hints: the flag computation, `build_hints`, and the queue hint.
+    /// Single source of truth for the two former duplicated blocks in `current_shortcut_hints` and `draw`.
     fn normal_pane_hints(
         &self,
         registry: &ActionRegistry,
@@ -550,10 +553,10 @@ impl AgentView {
     ///
     /// Thin orchestrator: computes layout, then calls shared widgets and
     /// agent-specific overlay helpers in sequence. Each component takes
-    /// only the state it needs — no arg threading.
+    /// only the state it needs (no arg threading).
     ///
     /// Returns cursor position if the prompt is focused (for terminal cursor).
-    /// Render a fullscreen subagent view — replaces the ENTIRE parent view.
+    /// Render a fullscreen subagent view; replaces the ENTIRE parent view.
     ///
     /// Draws:
     /// 1. Background fill
@@ -846,9 +849,11 @@ impl AgentView {
             left_spans.push(Span::styled("\u{2190}/\u{2192}", hint_key));
             left_spans.push(Span::styled(" question", hint_style));
         }
-        left_spans.push(Span::styled(" \u{b7} ", hint_style));
-        left_spans.push(Span::styled("y", hint_key));
-        left_spans.push(Span::styled(" copy", hint_style));
+        if !qv.is_prompt_blocked() {
+            left_spans.push(Span::styled(" \u{b7} ", hint_style));
+            left_spans.push(Span::styled("y", hint_key));
+            left_spans.push(Span::styled(" copy", hint_style));
+        }
         left_spans
     }
     /// `area` is the screen region assigned to this agent view.
@@ -856,16 +861,12 @@ impl AgentView {
     #[allow(clippy::too_many_arguments)]
     /// Render the agent into `area`.
     ///
-    /// `in_dashboard_overlay` is `true` when this view is being
-    /// rendered inside the dashboard's session-overlay; it appends
-    /// `Ctrl+\\:dashboard` (and, when `overlay_can_cycle`, the
-    /// `Ctrl+[/]:prev/next agent` chip) to the bottom shortcuts bar so the
-    /// user can discover keyboard back-out and agent navigation from
-    /// inside the agent view itself (not just from the overlay header).
+    /// `in_dashboard_overlay` is `true` when this view is being rendered inside the dashboard's session-overlay.
+    /// It appends `Ctrl+\\:dashboard` (and, when `overlay_can_cycle`, the `Ctrl+[/]:prev/next agent` chip) to the bottom shortcuts bar.
+    /// The user can then discover keyboard back-out and agent navigation from inside the agent view itself (not just from the overlay header).
     ///
-    /// `overlay_can_cycle` mirrors the header `[‹]`/`[›]` gate: true when
-    /// the visible overlay cycle order has more than one agent. Callers
-    /// derive it from the same `position` used for the header chips.
+    /// `overlay_can_cycle` mirrors the header `[‹]`/`[›]` gate: true when the visible overlay cycle order has more than one agent.
+    /// Callers derive it from the same `position` used for the header chips.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -1058,10 +1059,7 @@ impl AgentView {
             },
             show_accent_line: false,
             show_borders: true,
-            title: self
-                .display_name
-                .as_deref()
-                .map(|s| crate::views::session_title::sanitize_display_text(s).into_owned()),
+            title: self.prompt_caption(),
             image_preview: true,
         };
         let next = crate::views::session_title::rename_source_title_raw(self)
@@ -1080,7 +1078,10 @@ impl AgentView {
                 if self.session_banner_active {
                     banner_height
                 } else {
-                    banner_height.max(crate::tips::render::tip_height(inner_width, tip_text))
+                    banner_height.max(crate::tips::render::tip_height(
+                        inner_width.saturating_sub(crate::tips::render::HINT_INSET),
+                        tip_text,
+                    ))
                 }
             } else {
                 banner_height
@@ -1106,16 +1107,21 @@ impl AgentView {
                 .desired_height(inner_width, &prompt_style, true, max_prompt_height)
         };
         let overlay_content_w = inner_width.saturating_sub(QUESTION_VIEW_HPAD) as usize;
-        let permission_view_h = if let Some(perm) = self.permission_queue.front() {
-            crate::views::permission_view::permission_view_height(
-                perm,
-                area.height,
-                overlay_content_w,
-            )
+        let slot_card = self.blocking_card();
+        let permission_view_h = if slot_card == Some(BlockingCard::Permission) {
+            if let Some(perm) = self.permission_queue.front() {
+                crate::views::permission_view::permission_view_height(
+                    perm,
+                    area.height,
+                    overlay_content_w,
+                )
+            } else {
+                0
+            }
         } else {
             0
         };
-        let question_view_h = if permission_view_h == 0 {
+        let question_view_h = if slot_card == Some(BlockingCard::Question) {
             if let Some(ref mut qv) = self.question_view {
                 crate::views::question_view::question_view_height(
                     qv,
@@ -1128,22 +1134,32 @@ impl AgentView {
         } else {
             0
         };
-        let rewind_view_h = if permission_view_h == 0 && question_view_h == 0 {
-            if let Some(ref rw) = self.rewind_state {
-                crate::views::rewind::rewind_overlay_height(&rw.phase, area.height)
+        let elicitation_view_h = if slot_card == Some(BlockingCard::McpElicitation) {
+            if let Some(ref ev) = self.elicitation_view {
+                crate::views::elicitation_view::elicitation_view_height(
+                    ev,
+                    area.height,
+                    overlay_content_w,
+                )
             } else {
                 0
             }
         } else {
             0
         };
-        let cancel_turn_view_h =
-            if permission_view_h == 0 && question_view_h == 0 && rewind_view_h == 0 {
-                if self.cancel_turn_view.is_some() {
-                    modal::cancel_turn_panel_height(area.height)
+        let rewind_view_h =
+            if permission_view_h == 0 && question_view_h == 0 && elicitation_view_h == 0 {
+                if let Some(ref rw) = self.rewind_state {
+                    crate::views::rewind::rewind_overlay_height(&rw.phase, area.height)
                 } else {
                     0
                 }
+            } else {
+                0
+            };
+        let cancel_turn_view_h =
+            if slot_card == Some(BlockingCard::CancelTurn) && rewind_view_h == 0 {
+                modal::cancel_turn_panel_height(area.height)
             } else {
                 0
             };
@@ -1184,7 +1200,7 @@ impl AgentView {
         let feedback_pane = self
             .question_view
             .as_ref()
-            .is_some_and(|qv| qv.is_feedback());
+            .is_some_and(|qv| qv.is_feedback_report());
         let inline_prompt_max = ((area.height as u32) / 3).clamp(3, 15) as u16;
         let question_prompt_body_h = if question_view_h == 0 || !is_question_input_mode {
             0
@@ -1237,6 +1253,8 @@ impl AgentView {
             question_view_h.saturating_sub(freeform_offset)
                 + question_prompt_body_h
                 + question_footer_h
+        } else if elicitation_view_h > 0 {
+            elicitation_view_h
         } else if rewind_view_h > 0 {
             rewind_view_h
         } else if jump_view_h > 0 {
@@ -1399,9 +1417,7 @@ impl AgentView {
         }
         let overlay_blocks_rail_hover = self.jump_state.is_some()
             || self.rewind_state.is_some()
-            || self.question_view.is_some()
-            || !self.permission_queue.is_empty()
-            || self.cancel_turn_view.is_some()
+            || self.blocking_card().is_some()
             || self.block_viewer.is_some();
         if layout.timeline_width > 0 {
             self.sync_pending_user_input_marks();
@@ -1510,7 +1526,6 @@ impl AgentView {
             task_counts,
             &theme,
             self.hit_bg_status.hovered,
-            self.tasks.tick_count(),
         ) {
             status.push("bg_tasks", line);
         }
@@ -1582,14 +1597,7 @@ impl AgentView {
         self.hit_context.rect = areas.get("context").copied();
         self.hit_credits.rect = areas.get("credits").copied();
         self.hit_plan_button.rect = areas.get("plan").copied();
-        let home = std::env::var("HOME").ok();
-        let display = self.session.cwd.display().to_string();
-        let short = match &home {
-            Some(h) if display.starts_with(h.as_str()) => {
-                format!("~{}", &display[h.len()..])
-            }
-            _ => display,
-        };
+        let short = crate::util::abbreviate_path(&self.session.cwd.to_string_lossy()).into_owned();
         let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         use unicode_width::UnicodeWidthStr;
         let mut parts: Vec<Span> = Vec::new();
@@ -2235,8 +2243,14 @@ impl AgentView {
                         .tracker
                         .running_execute_tool_call_id()
                         .is_some();
-                let is_pending_user_input =
-                    !self.permission_queue.is_empty() || self.question_view.is_some();
+                let is_pending_user_input = matches!(
+                    self.blocking_card(),
+                    Some(
+                        BlockingCard::Permission
+                            | BlockingCard::Question
+                            | BlockingCard::McpElicitation
+                    )
+                );
                 let goal_verifying = self
                     .goal_state
                     .as_ref()
@@ -2365,7 +2379,12 @@ impl AgentView {
                 && banner_height > 0
                 && let Some(tip_text) = tip
             {
-                crate::tips::render::render_tip(layout.banner, buf, tip_text);
+                crate::tips::render::render_tip(
+                    layout.banner,
+                    buf,
+                    tip_text,
+                    crate::tips::render::HINT_INSET,
+                );
             }
             if !announcement_banner_owns_slot
                 && tip_row_visible
@@ -2891,7 +2910,7 @@ impl AgentView {
                     let avail_w = footer_w.saturating_sub(3);
                     buf.set_line_safe(content_x, footer_y, &left_line, avail_w);
                     let is_last = qv.active_tab >= qv.questions.len().saturating_sub(1);
-                    let enter_label = if feedback_pane {
+                    let enter_label = if feedback_pane || qv.is_feedback_trace() {
                         "send"
                     } else if qv.is_on_freeform_row() {
                         "edit"
@@ -2964,6 +2983,24 @@ impl AgentView {
                 self.hit_question_scrollbar.set(sb_rect);
             } else {
                 self.hit_question_scrollbar.clear();
+            }
+        } else if elicitation_view_h > 0 {
+            self.elicit_hits.clear();
+            if let Some(ev) = self.elicitation_view.as_mut() {
+                let elicit_area = Rect {
+                    x: layout.prompt.x,
+                    y: layout.prompt.y,
+                    width: layout.prompt.width,
+                    height: layout.prompt.height,
+                };
+                crate::views::elicitation_view::render_elicitation_view(
+                    buf,
+                    elicit_area,
+                    ev,
+                    &theme,
+                    prompt_focused,
+                    Some(&mut self.elicit_hits),
+                );
             }
         } else if rewind_view_h > 0 {
             if let Some(ref rw) = self.rewind_state {
@@ -3074,9 +3111,8 @@ impl AgentView {
                             buf.set_line_safe(hint_x, top_border_y, &hint_line, hint_w);
                         }
                     }
-                    let content_inset = 1 + layout_cfg.eff_hpad_left(compact);
-                    let items_x = layout.prompt.x + content_inset;
-                    let items_width = layout.prompt.width.saturating_sub(content_inset);
+                    let items_x = layout.prompt.x + dropdown_content_inset();
+                    let items_width = dropdown_items_width(layout.prompt);
                     let items_area = Rect {
                         x: items_x,
                         y: top_border_y + 1,
@@ -3100,7 +3136,7 @@ impl AgentView {
             };
             let snap = self.prompt.slash_snapshot();
             let item_count = snap.matches.len();
-            let items_width = dropdown_items_width(layout.prompt, layout_cfg, compact);
+            let items_width = dropdown_items_width(layout.prompt);
             let item_rows = desired_item_rows(&snap.matches, items_width);
             if item_rows > 0 {
                 if let Some(chrome) = render_dropdown_chrome(
@@ -3221,9 +3257,8 @@ impl AgentView {
                         );
                     }
                 }
-                let content_inset = 1 + layout_cfg.eff_hpad_left(compact);
-                let items_x = layout.prompt.x + content_inset;
-                let items_width = layout.prompt.width.saturating_sub(content_inset);
+                let items_x = layout.prompt.x + dropdown_content_inset();
+                let items_width = dropdown_items_width(layout.prompt);
                 let items_area_rect = Rect {
                     x: items_x,
                     y: top_border_y + 1,
@@ -4382,13 +4417,14 @@ impl AgentView {
             let live: crate::views::workflows::WorkflowAgentLiveMap = self
                 .subagent_sessions
                 .iter()
-                .filter(|(_, info)| info.workflow_run_id.is_some() && info.is_running())
+                .filter(|(_, info)| info.workflow_run_id.is_some())
                 .map(|(id, info)| {
                     (
                         id.clone(),
                         crate::views::workflows::WorkflowAgentLiveStatus {
                             activity: info.activity_label.clone(),
-                            tokens_used: info.tokens_used,
+                            context_tokens: info.tokens_used,
+                            context_window_tokens: info.context_window_tokens,
                             elapsed_ms: Some(info.display_elapsed().as_millis() as u64),
                         },
                     )
@@ -4475,11 +4511,9 @@ impl AgentView {
         (cursor, prompt_post_flush)
     }
 }
-/// Draw one ▼/▲ scroll-indicator arrow centered on row `y`, or clear its
-/// hit area when hidden (`y: None`). The unconditional set-or-clear is the
-/// point: a hit rect must never outlive the frame that painted its arrow,
-/// or an invisible click target keeps firing under whatever covers it
-/// (e.g. an open block viewer).
+/// Draw one ▼/▲ scroll-indicator arrow centered on row `y`, or clear its hit area when hidden (`y: None`).
+/// The unconditional set-or-clear is the point: a hit rect must never outlive the frame that painted its arrow.
+/// An invisible click target would keep firing under whatever covers it (e.g. an open block viewer).
 fn draw_scroll_arrow(
     buf: &mut Buffer,
     theme: &Theme,
@@ -4503,10 +4537,9 @@ fn draw_scroll_arrow(
     }
     hit.set(Some(Rect::new(center_x.saturating_sub(1), y, 3, 1)));
 }
-/// Pad `msg` for the toast slot, truncating with a trailing ellipsis when it
-/// cannot fit in `avail_width` columns (long clipboard toasts embed backup
-/// file paths — dropping the whole toast would hide the copy feedback
-/// entirely). Returns `None` only when the slot is too narrow for any text.
+/// Pad `msg` for the toast slot, truncating with a trailing ellipsis when it cannot fit in `avail_width` columns.
+/// (Long clipboard toasts embed backup file paths; dropping the whole toast would hide the copy feedback entirely.)
+/// Returns `None` only when the slot is too narrow for any text.
 fn fit_toast_text(msg: &str, avail_width: u16) -> Option<String> {
     let max_msg_chars = (avail_width as usize).saturating_sub(4);
     if max_msg_chars == 0 {
@@ -4625,10 +4658,9 @@ mod voice_recording_overlay_tests {
             })
             .collect()
     }
-    /// The plan approval's line-viewer overlay used to paint over the
-    /// `voice_recording` row, leaving a live mic (Ctrl+Space / F8 still work
-    /// there) with no visible "Recording" indicator. The overlay must stop
-    /// above the record indicator row.
+    /// The plan approval's line-viewer overlay used to paint over the `voice_recording` row.
+    /// That left a live mic (Ctrl+Space / F8 still work there) with no visible "Recording" indicator.
+    /// The overlay must stop above the record indicator row.
     #[test]
     fn recording_row_visible_while_plan_approval_open() {
         let mut agent = plan_approval_agent();
@@ -4638,8 +4670,7 @@ mod voice_recording_overlay_tests {
             "record indicator must stay visible under the plan approval viewer:\n{text}"
         );
     }
-    /// While voice is idle no indicator row exists, so the overlay keeps
-    /// reaching the prompt as before.
+    /// While voice is idle no indicator row exists, so the overlay keeps reaching the prompt as before.
     #[test]
     fn no_recording_row_when_not_listening_in_plan_approval() {
         let mut agent = plan_approval_agent();
@@ -4760,10 +4791,10 @@ mod overlay_post_flush_tests {
         let post_flush = draw(&mut parent).expect("child clear propagates");
         assert!(post_flush.as_str().contains("a=d"));
         let before_emit = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 41).unwrap();
-        assert!(!before_emit.as_str().contains("a=t"));
+        assert!(!before_emit.as_str().contains("a=T"));
         post_flush.write_to(&mut Vec::new()).unwrap();
         let after_emit = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 41).unwrap();
-        assert!(after_emit.as_str().contains("a=t"));
+        assert!(after_emit.as_str().contains("a=T"));
     }
     #[test]
     fn active_modal_returns_clear_without_committing_discarded_state() {
@@ -4781,10 +4812,10 @@ mod overlay_post_flush_tests {
         let post_flush = draw(&mut agent).expect("modal clear returned");
         assert!(post_flush.as_str().contains("a=d"));
         let before_emit = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 42).unwrap();
-        assert!(!before_emit.as_str().contains("a=t"));
+        assert!(!before_emit.as_str().contains("a=T"));
         post_flush.write_to(&mut Vec::new()).unwrap();
         let after_emit = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 42).unwrap();
-        assert!(after_emit.as_str().contains("a=t"));
+        assert!(after_emit.as_str().contains("a=T"));
     }
 }
 #[cfg(test)]
@@ -4799,9 +4830,9 @@ mod permission_hint_tests {
         PermissionFocus::FollowupInput,
         PermissionFocus::PatternEdit,
     ];
-    /// The footer Ctrl-F hint must track the key exactly: shown in every
-    /// focus mode when something is collapsible (the key fires before the
-    /// focus match), absent for protected-edit warning descriptions.
+    /// The footer Ctrl-F hint must track the key exactly.
+    /// Shown in every focus mode when something is collapsible (the key fires before the focus match).
+    /// Absent for protected-edit warning descriptions.
     #[test]
     fn ctrl_f_hint_follows_the_key_in_every_focus_mode() {
         let mut agent = make_agent();
@@ -4974,6 +5005,41 @@ mod feedback_input_tests {
             "every text row of the box needs both side rules\n{screen}"
         );
     }
+    #[test]
+    fn feedback_trace_question_renders_options() {
+        let mut agent = feedback_agent();
+        {
+            let qv = agent.question_view.as_mut().expect("pane");
+            qv.begin_feedback_trace_stage("clipboard is broken over ssh".into(), vec![]);
+        }
+        let screen = render_text(&mut agent);
+        for fragment in ["Opt-in to provide your trace", "retain and train"] {
+            assert!(
+                screen.contains(fragment),
+                "trace question label missing ({fragment})\n{screen}"
+            );
+        }
+        for option in ["Opt in", "Opt out this time"] {
+            assert!(screen.contains(option), "{option} missing\n{screen}");
+        }
+        let selected_row = screen
+            .lines()
+            .find(|l| l.contains("Opt in") && !l.contains("Opt out"))
+            .expect("first option row");
+        assert!(
+            selected_row.contains('\u{25cf}'),
+            "turning trace upload on must render preselected\n{screen}"
+        );
+        assert!(
+            screen.contains("Enter:send"),
+            "footer must offer send\n{screen}"
+        );
+        assert!(
+            !screen.contains("dismiss"),
+            "the trace card cannot be dismissed without sending; the bar must \
+             not promise it\n{screen}"
+        );
+    }
     /// A shrunk box must not paint over the shortcuts bar or leave the user typing into a pane that renders nothing.
     #[test]
     fn feedback_report_box_shrinks_on_a_short_terminal() {
@@ -5071,8 +5137,7 @@ mod status_line_draw_tests {
         let (x, y) = find(&buf, "RED").expect("the script row is on screen");
         assert_eq!(buf[(x, y)].bg, Color::Red);
     }
-    /// Agent with the bare `/feedback` pane open and focused, which asks for
-    /// most of the screen.
+    /// Agent with the bare `/feedback` pane open and focused, which asks for most of the screen.
     fn question_agent() -> AgentView {
         let mut agent = make_agent();
         let stashed = agent.prompt.stash();
@@ -5121,8 +5186,7 @@ mod status_line_draw_tests {
             "the prompt keeps its bottom rule\n{screen}"
         );
         assert!(
-            // The label, not the binding: a terminal that cannot send `Ctrl+.`
-            // draws `Ctrl+x` for the same cheatsheet.
+            // The label, not the binding: a terminal that cannot send `Ctrl+.` draws `Ctrl+x` for the same cheatsheet
             find(&buf, ":shortcuts").is_some(),
             "the shortcuts bar keeps its row\n{screen}"
         );

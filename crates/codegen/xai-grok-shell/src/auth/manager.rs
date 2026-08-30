@@ -18,14 +18,17 @@ pub(super) mod lock;
 #[path = "manager/remedy.rs"]
 mod remedy;
 pub(crate) use remedy::{AuthRemedy, BoundedRefresh, SilentRefresh};
+#[path = "manager/refresh_chain.rs"]
+mod refresh_chain;
 #[path = "manager/sleep_gate.rs"]
 mod sleep_gate;
 
-use lock::try_lock_auth_file_async;
-use sleep_gate::{InFlightGuard, SleepGate};
+use lock::{LockAcquire, try_lock_auth_file_async};
+use sleep_gate::SleepGate;
 
 use crate::util::dual_clock::DualClock;
 
+use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
 use crate::auth::config::GrokComConfig;
 use crate::auth::error::AuthError;
 use crate::auth::token_type::TokenType;
@@ -48,8 +51,8 @@ use chrono::DateTime;
 #[cfg(test)]
 use enrichment::apply_user_info_enrichment;
 
-#[cfg(test)]
 use super::model::AuthStore;
+#[cfg(test)]
 use super::model::LEGACY_SCOPE;
 
 /// Why a token refresh is being requested.
@@ -107,7 +110,7 @@ pub(crate) const AUTH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 /// Deliberate tradeoff: adopt-or-transient is the design, so a follower that
 /// cannot adopt a sibling's mint retries on its caller's backoff rather than
 /// pinning startup-path callers behind a slow leader (pre-fix: 45s waits).
-const REFRESH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(25);
+pub(crate) const REFRESH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(25);
 
 /// Budget for [`AuthManager::refresh_chain_bounded`] at RPC-path call sites:
 /// covers one full healthy OIDC token attempt (15s HTTP budget) plus flock
@@ -326,22 +329,11 @@ impl ScopeRemoval {
     }
 }
 
-/// Outcome of [`AuthManager::acquire_refresh_lock_or_adopt`] and
-/// [`AuthManager::revalidate_lock_or_reacquire`]: the `auth.json` file lock is
-/// proven live (or re-acquired) before the irreversible IdP call, so the RAII
-/// guard outlives the exchange and no refresh token is double-spent; `Adopted`
-/// means a sibling's freshly rotated token landed and the caller should return
-/// it without refreshing.
-enum LockOutcome {
-    Held(AuthFileLock),
-    Adopted(Box<GrokAuth>),
-}
-
 // ── Construction + builders ──────────────────────────────────────────
 
 impl AuthManager {
     pub fn new(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
-        let scope = grok_com_config.auth_scope();
+        let scope = ActiveAuthBackend::default().scope_key(&grok_com_config);
         let proxy_base_url =
             crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
 
@@ -385,27 +377,7 @@ impl AuthManager {
         let (auth, auth_read_detail, initial_disk_state) = match read_auth_json(&path) {
             Ok(map) => {
                 let found = lookup_auth(&map, &scope);
-                // If lookup_auth skipped a legacy WebLogin token, remove the
-                // stale scope entry from auth.json so it is not re-evaluated
-                // on every launch.
-                if found.is_none()
-                    && map
-                        .get(LEGACY_SCOPE)
-                        .is_some_and(|a| a.auth_mode == AuthMode::WebLogin)
-                {
-                    // Best-effort cleanup under advisory lock (consistent with
-                    // other auth.json writers). Non-blocking: if the lock is
-                    // held by a concurrent process, skip — retried next launch.
-                    if let Some(_lock) = lock::try_lock_auth_file_nonblocking(&path) {
-                        let mut cleaned = map.clone();
-                        cleaned.remove(LEGACY_SCOPE);
-                        let _ = write_auth_json(&path, &cleaned);
-                        tracing::debug!("auth: removed stale WebLogin scope from auth.json");
-                        // lock released on drop
-                    } else {
-                        tracing::debug!("auth: skipped WebLogin cleanup (lock unavailable)");
-                    }
-                }
+                Self::prune_stale_inherited_scopes(&path, &map, found.is_none());
                 let detail = serde_json::json!({
                     "read": "ok",
                     "resolved_path": path.display().to_string(),
@@ -456,6 +428,39 @@ impl AuthManager {
         // so the first launch forces a compliant login.
         manager.enforce_pin_on_loaded_token();
         manager
+    }
+
+    /// Drops inherited `WebLogin` entries that `lookup_auth` skipped, so they are not re-evaluated on
+    /// every launch. Best-effort under the advisory lock: a concurrent holder means retry next launch.
+    fn prune_stale_inherited_scopes(path: &Path, map: &AuthStore, lookup_missed: bool) {
+        if !lookup_missed {
+            return;
+        }
+
+        let stale: Vec<&str> = ActiveAuthBackend::default()
+            .inherited_scopes()
+            .iter()
+            .filter(|scope| {
+                map.get(**scope)
+                    .is_some_and(|a| a.auth_mode == AuthMode::WebLogin)
+            })
+            .copied()
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+
+        let Some(_lock) = lock::try_lock_auth_file_nonblocking(path) else {
+            tracing::debug!("auth: skipped WebLogin cleanup (lock unavailable)");
+            return;
+        };
+
+        let mut cleaned = map.clone();
+        for scope in stale {
+            cleaned.remove(scope);
+        }
+        let _ = write_auth_json(path, &cleaned);
+        tracing::debug!("auth: removed stale WebLogin scope from auth.json");
     }
 
     /// Single field-assembly point for [`Self::new`]'s two construction paths
@@ -748,6 +753,11 @@ impl AuthManager {
                 .api_key_auth_disabled()
                 .then_some(AuthError::ApiKeyAuthDisabled);
         }
+        // The pin reads an xAI-issued claim, and a token minted elsewhere has none.
+        // The failure path clears the scope, so an unguarded check deletes the credential every launch.
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return None;
+        }
         let policy = crate::auth::oidc::login_principal_policy(&self.grok_com_config)?;
         let actual = crate::auth::oidc::peek_access_token_principal_id(&auth.key);
         crate::auth::oidc::enforce_login_principal(Some(&policy), actual.as_deref())
@@ -775,6 +785,20 @@ impl AuthManager {
         }
     }
 
+    /// Every accessor that hands a credential to a caller reads `inner` through here.
+    /// The direct reads left elsewhere compare token keys or look at `expires_at`, and hand out nothing.
+    fn owned_inner(&self) -> Option<GrokAuth> {
+        let auth = self.with_inner_read(|inner| inner.cloned())?;
+        if !crate::auth::backend::AuthBackend::owns(
+            &crate::auth::backend::ActiveAuthBackend::default(),
+            &auth,
+        ) {
+            tracing::debug!("auth: hiding a cached session another authority minted");
+            return None;
+        }
+        Some(auth)
+    }
+
     /// Hide a cached token rejected by the login policy. No clear here (keeps
     /// the sync read path lock-free); `auth()`/recovery/`new()` do the clearing.
     fn vet_cached(&self, auth: GrokAuth) -> Option<GrokAuth> {
@@ -789,12 +813,7 @@ impl AuthManager {
 
     /// Cached in-memory token if outside the early-invalidation buffer.
     pub(crate) fn current(&self) -> Option<GrokAuth> {
-        let auth = self
-            .inner
-            .read()
-            .as_ref()
-            .filter(|a| !self.is_token_expired(a))
-            .cloned()?;
+        let auth = self.owned_inner().filter(|a| !self.is_token_expired(a))?;
         self.vet_cached(auth)
     }
 
@@ -815,10 +834,8 @@ impl AuthManager {
 
     /// Returns true if credentials exist but have expired.
     pub(crate) fn is_expired(&self) -> bool {
-        self.inner
-            .read()
-            .as_ref()
-            .is_some_and(|a| self.is_token_expired(a))
+        self.owned_inner()
+            .is_some_and(|a| self.is_token_expired(&a))
     }
 
     /// In-memory bearer regardless of the early-invalidation buffer.
@@ -832,11 +849,8 @@ impl AuthManager {
     /// refresh and must not demote a still-accepted token.
     pub(crate) fn current_wire_valid(&self) -> Option<GrokAuth> {
         let auth = self
-            .inner
-            .read()
-            .as_ref()
-            .filter(|a| !self.is_token_hard_expired(a))
-            .cloned()?;
+            .owned_inner()
+            .filter(|a| !self.is_token_hard_expired(a))?;
         self.vet_cached(auth)
     }
 
@@ -865,12 +879,7 @@ impl AuthManager {
 
     /// Expired in-memory entry (for its `refresh_token`).
     pub(crate) fn expired_auth(&self) -> Option<GrokAuth> {
-        let auth = self
-            .inner
-            .read()
-            .as_ref()
-            .filter(|a| self.is_token_expired(a))
-            .cloned()?;
+        let auth = self.owned_inner().filter(|a| self.is_token_expired(a))?;
         self.vet_cached(auth)
     }
 
@@ -1026,7 +1035,12 @@ impl AuthManager {
     }
 
     /// Spawn the `/user` enrichment task; body in the `enrichment` submodule.
+    /// `/user` lives on the xAI proxy, so a build pointed elsewhere would send its bearer to the wrong host.
+    /// That would happen on every login and every refresh.
     fn spawn_user_info_enrichment(self: &Arc<Self>, auth: GrokAuth) {
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return;
+        }
         enrichment::spawn(Arc::clone(self), auth);
     }
 
@@ -1213,7 +1227,7 @@ impl AuthManager {
     /// mis-classify an OIDC token. Carries user fields forward into the
     /// binary's freshly-minted token.
     fn inner_auth_or_external_default(&self) -> GrokAuth {
-        self.inner.read().clone().unwrap_or_else(|| GrokAuth {
+        self.owned_inner().unwrap_or_else(|| GrokAuth {
             auth_mode: AuthMode::External,
             ..Default::default()
         })
@@ -1399,11 +1413,13 @@ impl AuthManager {
         }
     }
 
+    #[tracing::instrument(name = "auth.lock_wait", skip_all)]
     pub(crate) async fn try_lock_auth_file_async(
         &self,
         timeout: StdDuration,
-    ) -> Option<AuthFileLock> {
-        try_lock_auth_file_async(&self.path, timeout).await
+        heartbeat: lock::Heartbeat,
+    ) -> LockAcquire {
+        try_lock_auth_file_async(&self.path, timeout, heartbeat).await
     }
 
     // ── Refresher setup ─────────────────────────────────────────────
@@ -1462,7 +1478,7 @@ impl AuthManager {
     /// `pub(super)` — for refresh dispatch only. External session
     /// classification uses `is_session_based_method`.
     pub(super) fn token_type(&self) -> TokenType {
-        TokenType::from_auth(self.inner.read().as_ref())
+        TokenType::from_auth(self.owned_inner().as_ref())
     }
 
     // ── Pre-request dispatch ──────────────────────────────────────────
@@ -1485,7 +1501,7 @@ impl AuthManager {
     async fn auth_dispatch(self: &Arc<Self>) -> Result<GrokAuth, AuthError> {
         // Snapshot inner ONCE for dispatch atomicity (closes a TOCTOU
         // where a concurrent `clear()` raced `token_type()` + `inner.read()`).
-        let snapshot: Option<GrokAuth> = self.with_inner_read(|inner| inner.cloned());
+        let snapshot: Option<GrokAuth> = self.owned_inner();
         // Kept alongside `snapshot`, which the grace arm below consumes: the
         // devbox arms still need to name the credential they gave up on.
         let snapshot_key: Option<String> = snapshot.as_ref().map(|a| a.key.clone());
@@ -1636,6 +1652,11 @@ impl AuthManager {
         self: &Arc<Self>,
         unusable: Option<&str>,
     ) -> Result<GrokAuth, AuthError> {
+        // Devbox mints an xAI credential and clears auth.json to do it.
+        // Under another authority that evicts the sibling login and hands an xAI refresh token to a foreign host.
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return Err(AuthError::NotLoggedIn);
+        }
         if self.grok_com_config.blocks_automatic_oidc() {
             tracing::debug!(
                 "auth: devbox recovery skipped (preferred_method=api_key blocks automatic OIDC)"
@@ -1706,317 +1727,8 @@ impl AuthManager {
 
     // ── Refresh chain (single mutation point) ─────────────────────────
 
-    /// Acquire lock, double-check, try disk, then active refresh via injected refresher.
-    ///
-    /// This is the single place where auth state is mutated during refresh.
-    /// The refresher returns data only (`RefreshOutcome`); all persistence,
-    /// credential clearing, and permanent-failure recording happen here.
-    ///
-    /// Short-circuits with the cached permanent failure if a previous attempt
-    /// has already recorded one for this credential, avoiding refresh requests
-    /// we know will fail (e.g. from per-401 `unauthorized_recovery().next()`
-    /// invocations that bypass `auth()`'s own permanent-failure check).
-    #[tracing::instrument(skip(self), fields(?token_type, ?reason))]
-    pub(crate) async fn refresh_chain(
-        self: &Arc<Self>,
-        token_type: TokenType,
-        reason: RefreshReason,
-    ) -> Result<GrokAuth, AuthError> {
-        // 0. Sticky permanent-failure short-circuit, checked BEFORE acquiring
-        //    the refresh lock so a backed-off chain doesn't block concurrent
-        //    traffic. Mirrors `auth()` so callers routing through
-        //    `unauthorized_recovery()` (skipping `auth()`) get the same backoff.
-        //
-        //    A sibling process may have refreshed while we were blocked, so try
-        //    disk adoption first: a valid token changes the key, making the
-        //    stale verdict read through as absent (no explicit clear). Breaks
-        //    the retry storm where background consumers pile up 401s.
-        if let Some(err) = self.permanent_failure() {
-            if let Some(refreshed) = self.try_adopt_disk_token(
-                reason,
-                "auth: adopted sibling token during PermanentFailure short-circuit",
-            ) {
-                return Ok(refreshed);
-            }
-            // Debug, not warn: the verdict transition is already logged once by
-            // `record_permanent_failure`; a 401-hammering consumer must not
-            // flood warns on every short-circuited call.
-            xai_grok_telemetry::unified_log::debug(
-                "auth: refresh_chain short-circuit on permanent failure",
-                None,
-                Some(serde_json::json!({
-                    "token_type": format!("{token_type:?}"),
-                    "reason": format!("{reason:?}"),
-                    "failure": format!("{err}"),
-                })),
-            );
-            return Err(err);
-        }
-
-        // Snapshot the token key before acquiring the lock so we can tell
-        // whether another task refreshed while we were waiting.
-        let pre_lock_key = self.current().map(|a| a.key.clone());
-
-        let _guard = self.refresh_lock.lock().await;
-
-        // 1. Double-check: another task may have refreshed while we waited.
-        //    For ServerRejected we still check, but only return early if the
-        //    token has *changed* (i.e. another task already refreshed it).
-        //    If it is the same token that was rejected, we must proceed to
-        //    the IdP to obtain one with fresh claims (e.g. after subscription
-        //    purchase).
-        if let Some(auth) = self.current()
-            && (reason != RefreshReason::ServerRejected
-                || pre_lock_key.as_deref() != Some(&auth.key))
-        {
-            return Ok(auth);
-        }
-
-        // 1b. Re-check the verdict under the lock: consumers that passed step 0
-        //     before the leader recorded the failure would otherwise each hit
-        //     the IdP with the dead credential. Caps a 401 burst at one call.
-        if let Some(err) = self.permanent_failure() {
-            return Err(err);
-        }
-
-        // 1c. Adopt a sibling's already-rotated token before contending the
-        //     flock: most convoy acquisitions are pure adoptions needing no
-        //     exclusivity, and skipping the flock is the cross-process win.
-        //     Runs under the in-process mutex (after steps 1/1b re-validated
-        //     memory and the verdict), so a stale disk snapshot can never
-        //     clobber a concurrent local mint. Same-key ServerRejected falls
-        //     through via `try_use_disk_token`'s key guard; the under-lock
-        //     adopt in `acquire_refresh_lock_or_adopt` remains the
-        //     authoritative last check.
-        if let Some(refreshed) =
-            self.try_adopt_disk_token(reason, "auth: refresh adopted sibling token pre-lock")
-        {
-            return Ok(refreshed);
-        }
-
-        // 2. Acquire the exclusive file lock (or adopt a sibling token). The
-        //    returned guard is held (via `file_lock` below) across the IdP call
-        //    so only one participant ever spends a given refresh token.
-        let file_lock = match self.acquire_refresh_lock_or_adopt(reason).await? {
-            LockOutcome::Adopted(auth) => return Ok(*auth),
-            LockOutcome::Held(lock) => lock,
-        };
-
-        // 3. Active refresh via authority.
-        let refresher = self.refresher.read().clone();
-        let Some(refresher) = refresher else {
-            tracing::warn!("auth: no refresher configured");
-            return Err(AuthError::transient("no refresher configured"));
-        };
-
-        // Fallback verdict key, used only when the outcome carries no
-        // `tried_key` (external-binary flow). Captured before the IdP call so it
-        // reflects the credential we resolved to send; see
-        // [`Self::attempted_verdict_key`].
-        let attempted_key = self.attempted_verdict_key(reason);
-
-        // 3a. Pre-IdP deferral guards (sleep / dark wake).
-        self.check_refresh_deferral(reason)?;
-
-        // 3b. Re-validate (and if needed re-acquire) the live lock before the
-        //     irreversible IdP call; adopt a sibling token if one landed.
-        let file_lock = match self.revalidate_lock_or_reacquire(file_lock, reason).await? {
-            LockOutcome::Adopted(auth) => return Ok(*auth),
-            LockOutcome::Held(lock) => lock,
-        };
-
-        // 3c. Send the refresh token to the IdP and apply the outcome (the only
-        //     mutation point). `file_lock` stays held across both.
-        //
-        // Let an in-flight call finish even if sleep becomes imminent: we do NOT
-        // abort it. Once the refresh token is sent the IdP may already have
-        // rotated it, so dropping the future would discard the response carrying
-        // the new token, the exact revocation we guard against.
-        //
-        // To keep an in-flight refresh from *straddling* the suspend (the case
-        // `auth.sleep.refresh_in_flight_at_suspend` records), the `WillSleep`
-        // handler holds the OS sleep ack — macOS delays `IOAllowPowerChange`,
-        // Linux holds its `delay` inhibitor — until `refresh_in_flight` drains
-        // or `SLEEP_ACK_MAX_WAIT` elapses; see
-        // `AuthManager::hold_sleep_ack_until_refresh_drains`.
-        let outcome = {
-            // Claim an in-flight slot, then do a final sleep-gate re-check
-            // before the irreversible IdP call. A `WillSleep` may have raised
-            // the gate after the step-3a check — e.g. while we awaited the file
-            // lock in 3b. Claiming first and re-checking here narrows the race
-            // to a few non-awaiting instructions: a sleep transition either
-            // observes our slot (and its drain wait holds the ack for us) or we
-            // observe its gate and back out, so the refresh does not start into
-            // the suspend window the ack-hold protects.
-            let _in_flight = InFlightGuard::new(self);
-            if self.is_sleep_gated() {
-                xai_grok_telemetry::unified_log::warn(
-                    "auth.sleep.refresh_deferred",
-                    None,
-                    Some(serde_json::json!({
-                        "reason": format!("{reason:?}"),
-                        "has_live_token": self.current().is_some(),
-                        "stage": "pre_idp",
-                    })),
-                );
-                return Err(AuthError::transient(
-                    "refresh deferred: system sleep imminent",
-                ));
-            }
-            // A dark wake can re-sleep within seconds and sends no `WillSleep`
-            // first, so the ack hold above never runs there. Hold the system
-            // up for the exchange instead; a straddled exchange loses the
-            // rotated token, which is what revokes the family. Best-effort
-            // (`None` ⇒ proceed as before), released when the exchange returns.
-            let _awake = if self.is_dark_wake() {
-                xai_grok_telemetry::unified_log::debug(
-                    "auth.refresh.dark_wake_assertion",
-                    None,
-                    Some(serde_json::json!({ "reason": format!("{reason:?}") })),
-                );
-                xai_system_power::hold_awake("grok: OIDC token refresh")
-            } else {
-                None
-            };
-            refresher.refresh(reason).await
-        };
-        self.apply_refresh_outcome(outcome, reason, attempted_key, &file_lock)
-            .await
-    }
-
-    /// Step 2: take the exclusive `auth.json` file lock. On timeout, wait then
-    /// adopt a sibling's rotated token if one landed, else return transient: we
-    /// *never* fall through unguarded (that "same RT used twice" race triggers
-    /// invalid_grant + token-family revocation). With the lock held,
-    /// adopt a freshly-written disk token if present. Returns the live guard so
-    /// the caller keeps it across the IdP call.
-    async fn acquire_refresh_lock_or_adopt(
-        &self,
-        reason: RefreshReason,
-    ) -> Result<LockOutcome, AuthError> {
-        let lock_started = std::time::Instant::now();
-        let Some(file_lock) = self.try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT).await else {
-            tracing::warn!("auth: file lock timed out, waiting for sibling to finish");
-            xai_grok_telemetry::unified_log::warn(
-                "auth.refresh.lock_timeout",
-                None,
-                Some(serde_json::json!({
-                    "timeout_ms": lock_started.elapsed().as_millis() as u64,
-                    "reason": format!("{reason:?}"),
-                })),
-            );
-            tokio::time::sleep(LOCK_TIMEOUT_WAIT).await;
-            if let Some(refreshed) = self.try_adopt_disk_token(
-                reason,
-                "auth: refresh adopted sibling token after lock timeout",
-            ) {
-                return Ok(LockOutcome::Adopted(Box::new(refreshed)));
-            }
-            tracing::warn!("auth: returning transient to avoid RT reuse");
-            return Err(AuthError::transient(
-                "could not acquire auth.json.lock within timeout; \
-                 sibling may be mid-refresh",
-            ));
-        };
-        if let Some(refreshed) = self.try_adopt_disk_token(reason, "auth: refresh used disk token")
-        {
-            return Ok(LockOutcome::Adopted(Box::new(refreshed)));
-        }
-        Ok(LockOutcome::Held(file_lock))
-    }
-
-    /// Step 3a: defer the not-yet-started refresh on sleep / dark wake. Safe and
-    /// retryable because the refresh token was never sent.
-    fn check_refresh_deferral(&self, reason: RefreshReason) -> Result<(), AuthError> {
-        if self.is_sleep_gated() {
-            // `has_live_token == false` is the dangerous defer: with no valid
-            // token to fall back on, the caller's request 401s until the gate
-            // clears, so make these greppable to distinguish harmless defers
-            // (still-valid token) from the ones that surface as auth failures.
-            let has_live_token = self.current().is_some();
-            xai_grok_telemetry::unified_log::warn(
-                "auth.sleep.refresh_deferred",
-                None,
-                Some(serde_json::json!({
-                    "reason": format!("{reason:?}"),
-                    "has_live_token": has_live_token,
-                })),
-            );
-            return Err(AuthError::transient(
-                "refresh deferred: system sleep imminent",
-            ));
-        }
-
-        // Dark wake: an exchange risks straddling a re-sleep, so defer — but
-        // only while deferring is free (a *wire-valid* token can still be
-        // served). With a hard-expired token, or on `ServerRejected`,
-        // deferring converts a delay into a guaranteed 401. Dark-wake
-        // exchanges are protected by the `hold_awake` power assertion and
-        // the suspend probe (the ack hold can't cover them: macOS sends no
-        // `WillSleep` on a maintenance-sleep re-entry).
-        if reason == RefreshReason::PreRequest
-            && self.current_wire_valid().is_some()
-            && self.should_defer_for_dark_wake()
-        {
-            xai_grok_telemetry::unified_log::warn(
-                "auth.dark_wake.refresh_deferred",
-                None,
-                Some(serde_json::json!({ "reason": format!("{reason:?}") })),
-            );
-            return Err(AuthError::transient(
-                "refresh deferred: dark wake (display off; system may re-sleep)",
-            ));
-        }
-        // Not deferring: end any deferral run so a leftover budget can't report
-        // a spurious exhaustion on the next one (the lazy clear inside
-        // `should_defer_for_dark_wake` is no longer always reached).
-        *self.dark_wake_defer_since.write() = None;
-        Ok(())
-    }
-
-    /// Step 3b: re-validate that we still hold the *live* lock before the
-    /// irreversible IdP call. A system suspend can freeze us long enough
-    /// (> the stale-lock timeout) for a sibling to break our lock as "stuck"
-    /// (unlink + fresh inode); our flock would then live on a now-deleted inode,
-    /// and sending the refresh token would let two processes spend the same RT,
-    /// the double-spend that trips IdP rotation reuse detection. If the lock was
-    /// lost, re-acquire on the live inode (transient on timeout) and adopt a
-    /// sibling's freshly-rotated token if one landed ([`LockOutcome::Adopted`]).
-    async fn revalidate_lock_or_reacquire(
-        &self,
-        file_lock: AuthFileLock,
-        reason: RefreshReason,
-    ) -> Result<LockOutcome, AuthError> {
-        if file_lock.still_live(&self.path) {
-            return Ok(LockOutcome::Held(file_lock));
-        }
-        xai_grok_telemetry::unified_log::warn(
-            "auth.refresh.lock_lost_before_idp",
-            None,
-            Some(serde_json::json!({ "reason": format!("{reason:?}") })),
-        );
-        drop(file_lock);
-        let Some(relock) = self.try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT).await else {
-            return Err(AuthError::transient(
-                "refresh lock lost across suspend and re-acquire \
-                 timed out; retrying avoids refresh-token double-spend",
-            ));
-        };
-        if let Some(refreshed) = self.try_adopt_disk_token(
-            reason,
-            "auth: adopted sibling token after lock-loss revalidation",
-        ) {
-            return Ok(LockOutcome::Adopted(Box::new(refreshed)));
-        }
-        Ok(LockOutcome::Held(relock))
-    }
-
-    /// Step 3c outcome handling: the only mutation point, persisting on success
-    /// and recording the verdict on permanent failure. `attempted_key` is the
-    /// fallback verdict scope (used when the outcome carries no `tried_key`).
-    /// `_lock` is the held `auth.json` file lock: unused at runtime, threaded in
-    /// to type-enforce that the persisting `update()` runs while the lock is held
-    /// (so a future refactor can't drop it before persisting).
+    /// The only mutation point: persists on success, records the verdict on failure.
+    /// `_lock` type-enforces that the persisting `update()` runs under the file lock.
     async fn apply_refresh_outcome(
         self: &Arc<Self>,
         outcome: RefreshOutcome,
