@@ -230,10 +230,7 @@ impl UserPromptBlock {
     /// mid-turn interjections are excluded (interjections never receive a
     /// shell `prompt_index`).
     fn shows_turn_index(&self) -> bool {
-        self.prompt_index.is_some()
-            && !self.is_interjection
-            && !self.is_bash
-            && !self.is_cron
+        self.prompt_index.is_some() && !self.is_interjection && !self.is_bash && !self.is_cron
     }
 
     /// Compact label for the 0-based session turn index, trailing space included

@@ -13,6 +13,7 @@ use super::state::groups::{GroupKind, GroupSpan, span_containing};
 use super::state::verb_group::{
     GroupHeaderLabel, truncation_header_label, verb_group_header_label,
 };
+use super::sticky_edit::StickyEditHeaderPlan;
 use super::text_selection::{
     ResolvedSelectableLine, ResolvedSelectionBoundaries, ResolvedSelectionModel,
     VisibleBlockGeometry,
@@ -509,7 +510,14 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
         } else {
             (first_visible_content_y, content_skip)
         };
-        let mut screen_y = first_visible_content_y;
+        let sticky_edit = StickyEditHeaderPlan::for_entry(
+            &entry.block,
+            appearance,
+            mapped_lines,
+            content_skip,
+            max_y.saturating_sub(first_visible_content_y),
+        );
+        let visible_rows = max_y.saturating_sub(first_visible_content_y);
 
         // Labeled group header (either fold family): one synthetic selectable row so drag/copy on the header yields the aggregated label text
         // Plain-count headers carry no label and stay non-selectable.
@@ -535,7 +543,11 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 joiner_to_previous: None,
             });
         }
-        for (block_line_idx, line) in mapped_lines.iter().enumerate().skip(content_skip) {
+        for (block_line_idx, row_offset) in
+            sticky_edit.visible_lines(mapped_lines.len(), visible_rows)
+        {
+            let line = &mapped_lines[block_line_idx];
+            let screen_y = first_visible_content_y + row_offset;
             if screen_y >= max_y {
                 break;
             }
@@ -591,7 +603,6 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 }
                 result.selection_model.push_line(resolved_line);
             }
-            screen_y += 1;
         }
 
         // Collect hyperlinks for the link overlay
@@ -605,7 +616,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                         hyperlinks,
                         cached_output,
                         content_skip,
-                        first_visible_content_y,
+                        first_visible_content_y + sticky_edit.pinned_rows() as u16,
                         max_y,
                         entry_row_layout.content.x,
                         content_line_offset,
@@ -619,9 +630,11 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
             // Basename/relative tool headers need the stored absolute target.
             // The hit box is the selectable path span (respects bullet prepend and Selectable shift)
             {
-                for (idx, bl) in cached_output.lines.iter().enumerate().skip(content_skip) {
-                    let visible_offset = (idx - content_skip) as u16;
-                    let screen_row = first_visible_content_y + visible_offset;
+                for (idx, row_offset) in
+                    sticky_edit.visible_lines(cached_output.lines.len(), visible_rows)
+                {
+                    let bl = &cached_output.lines[idx];
+                    let screen_row = first_visible_content_y + row_offset;
                     if screen_row >= max_y {
                         break;
                     }
@@ -677,16 +690,15 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
             // Scan post-wrap lines for plain-text URLs and file paths.
             // For markdown blocks, markdown hyperlinks are already in the overlay (mapped above); explicit tool-link rows are authoritative
             {
-                let visible_lines = cached_output
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .skip(content_skip)
-                    .filter(|(_, bl)| bl.link_target.is_none())
-                    .map(|(idx, bl)| {
-                        let visible_offset = (idx - content_skip) as u16;
-                        let screen_row = first_visible_content_y + visible_offset;
-                        (screen_row, &bl.content, bl.joiner.as_deref())
+                let visible_lines = sticky_edit
+                    .visible_lines(cached_output.lines.len(), visible_rows)
+                    .filter_map(|(idx, row_offset)| {
+                        let bl = &cached_output.lines[idx];
+                        if bl.link_target.is_some() {
+                            return None;
+                        }
+                        let screen_row = first_visible_content_y + row_offset;
+                        Some((screen_row, &bl.content, bl.joiner.as_deref()))
                     })
                     .take_while(|(screen_row, _, _)| *screen_row < max_y);
 

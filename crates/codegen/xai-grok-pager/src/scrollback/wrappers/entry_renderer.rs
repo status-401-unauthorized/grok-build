@@ -772,6 +772,14 @@ impl Renderable for EntryRenderer<'_> {
 
         let mut row = content_area.y;
         let max_row = content_area.y + content_area.height;
+        let remaining_rows = max_row.saturating_sub(row);
+        let sticky_edit = crate::scrollback::sticky_edit::StickyEditHeaderPlan::for_entry(
+            &self.entry.block,
+            self.appearance(),
+            &output.lines,
+            content_skip as usize,
+            remaining_rows,
+        );
 
         // Top vpad (only if not skipped)
         if vpad_top_visible && row < max_row {
@@ -782,8 +790,10 @@ impl Renderable for EntryRenderer<'_> {
         // Per-row bg keeps code blocks whole
         let own_gutter = ts_reserved > 0 && bg_color.is_none() && content_area.width > ts_reserved;
 
-        // Content lines: skip the first `content_skip` lines
-        for line in output.lines.iter().skip(content_skip as usize) {
+        // Content lines: skip the first `content_skip` lines, except a pinned
+        // Edit path header which stays at the top of a tall scrolled diff.
+        for (idx, _) in sticky_edit.visible_lines(output.lines.len(), remaining_rows) {
+            let line = &output.lines[idx];
             if row >= max_row {
                 break;
             }
@@ -853,9 +863,14 @@ impl Renderable for EntryRenderer<'_> {
         // 3. Collapsed groupable block with colored bullet: dim the bullet color.
         //
         // The bullet is the first character on the first content row.
-        if skip_rows == 0 && self.entry.block.has_bullet(&ctx) {
+        // Pinned Edit headers re-paint line 0 (with its bullet) after skip_rows > 0.
+        if (skip_rows == 0 || sticky_edit.pinned) && self.entry.block.has_bullet(&ctx) {
             let bullet_style = self.entry.block.bullet(&ctx);
-            let bullet_y = content_area.y + if has_vpad { 1 } else { 0 };
+            let bullet_y = if sticky_edit.pinned {
+                content_area.y
+            } else {
+                content_area.y + if has_vpad { 1 } else { 0 }
+            };
 
             if bullet_y >= max_row {
                 // bullet not visible; skip post-pass
@@ -1779,6 +1794,95 @@ mod tests {
         assert!(
             buf_has_bg(&render_to_buf(&flat, 40), LINE_BG),
             "flat render must keep semantic (non-panel) line backgrounds"
+        );
+    }
+
+    fn tall_insert_hunk(n: usize) -> xai_grok_pager_diff::DiffHunk {
+        (1..=n)
+            .map(|i| xai_grok_pager_diff::DiffLine {
+                text: format!("line_{i}\n"),
+                lo: 0,
+                ln: i,
+                tag: similar::ChangeTag::Insert,
+            })
+            .collect()
+    }
+
+    fn render_expanded_edit(skip: u16, height: u16, sticky: bool) -> Buffer {
+        let theme = Theme::current();
+        let entry = ScrollbackEntry::new(RenderBlock::edit_with_hunks(
+            "src/long_file.rs",
+            vec![tall_insert_hunk(40)],
+        ))
+        .with_display_mode(DisplayMode::Expanded);
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.blocks.edit.sticky_header = sticky;
+        appearance.scrollback.blocks.edit.vpad = false;
+        let area = Rect::new(0, 0, 80, height);
+        let mut buf = Buffer::empty(area);
+        EntryRenderer::new(&entry, &theme)
+            .with_appearance(appearance)
+            .with_skip_rows(skip)
+            .render(area, &mut buf);
+        buf
+    }
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        collect_row_symbols(buf, y, 0, buf.area.width)
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn expanded_edit_keeps_path_header_when_scrolled() {
+        let unclipped = render_expanded_edit(0, 12, true);
+        let header = row_text(&unclipped, 0);
+        assert!(
+            header.contains("Edit") && header.contains("src/long_file.rs"),
+            "unclipped first row should be the path header, got {header:?}"
+        );
+
+        let clipped = render_expanded_edit(8, 12, true);
+        let pinned = row_text(&clipped, 0);
+        assert!(
+            pinned.contains("Edit") && pinned.contains("src/long_file.rs"),
+            "clipped first row should stay the path header, got {pinned:?}"
+        );
+
+        let body_a = row_text(&render_expanded_edit(8, 12, true), 1);
+        let body_b = row_text(&render_expanded_edit(9, 12, true), 1);
+        assert_ne!(
+            body_a, body_b,
+            "body under the pinned header must scroll (skip 8 vs 9)"
+        );
+        assert!(
+            !body_a.contains("Edit src/long_file.rs"),
+            "second row should be diff content, got {body_a:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_edit_header_scrolls_off_when_sticky_disabled() {
+        let clipped = render_expanded_edit(8, 12, false);
+        let first = row_text(&clipped, 0);
+        assert!(
+            !first.contains("Edit src/long_file.rs"),
+            "disabled sticky header must let the path scroll off, got {first:?}"
+        );
+        assert!(
+            first.contains("line_"),
+            "first visible row should be a diff line, got {first:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_edit_header_pushes_off_when_block_leaves_viewport() {
+        // One remaining row: not enough for header + body, so the header is not forced.
+        let last = render_expanded_edit(40, 1, true);
+        let first = row_text(&last, 0);
+        assert!(
+            !first.contains("Edit src/long_file.rs"),
+            "header must push off with the last body row, got {first:?}"
         );
     }
 }

@@ -395,6 +395,9 @@ pub struct EditBlockConfig {
     /// Show two line-number columns (old and new) like GitHub's unified diff.
     /// When false (default), show a single column with the new-file line number.
     pub dual_line_numbers: bool,
+    /// Pin the "Edit path" header at the top of a tall diff when scrolling
+    /// would otherwise clip it off. Independent of user-prompt sticky headers.
+    pub sticky_header: bool,
 }
 
 impl Default for EditBlockConfig {
@@ -411,6 +414,7 @@ impl Default for EditBlockConfig {
             expanded_by_default: None,
             hunk_separator: "…".to_string(),
             dual_line_numbers: false,
+            sticky_header: true,
         }
     }
 }
@@ -1033,6 +1037,9 @@ pub struct RawEditBlockConfig {
     /// Show two line-number columns (old + new) like GitHub's unified diff.
     /// When false (default), show a single column with the new-file line number.
     pub dual_line_numbers: bool,
+    /// Pin the "Edit path" line at the top of a tall diff when scrolling
+    /// would clip it off. Default: true.
+    pub sticky_header: bool,
 }
 
 impl Default for RawEditBlockConfig {
@@ -1049,6 +1056,7 @@ impl Default for RawEditBlockConfig {
             expanded_by_default: None,
             hunk_separator: Some("…".to_string()),
             dual_line_numbers: false,
+            sticky_header: true,
         }
     }
 }
@@ -1452,6 +1460,7 @@ impl From<RawEditBlockConfig> for EditBlockConfig {
             expanded_by_default: raw.expanded_by_default,
             hunk_separator: raw.hunk_separator.unwrap_or_else(|| "…".to_string()),
             dual_line_numbers: raw.dual_line_numbers,
+            sticky_header: raw.sticky_header,
         }
     }
 }

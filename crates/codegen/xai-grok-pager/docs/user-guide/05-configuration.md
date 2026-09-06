@@ -731,6 +731,7 @@ vpad = false                          # vertical padding
 # expanded_by_default = true          # unset: follows [ui] collapsed_edit_blocks in config.toml
                                       # (flag on = collapsed one-liner); uncomment to pin either shape
 dual_line_numbers = false             # two-column line numbers (old + new)
+sticky_header = true                  # pin "Edit path" at the top of a tall scrolled diff
 # line_summary = false                # show +N/-M in the collapsed header; unset follows the same flag
 hunk_separator = "…"                  # separator between diff hunks (default: "…")
 

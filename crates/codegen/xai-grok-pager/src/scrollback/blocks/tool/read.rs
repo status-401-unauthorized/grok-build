@@ -186,9 +186,7 @@ impl ReadToolCallBlock {
                 Span::styled("Skill ", bold_style),
                 Span::styled(skill.to_owned(), path_style),
             ];
-            if collapsed
-                && let Some(err) = &self.error
-            {
+            if collapsed && let Some(err) = &self.error {
                 spans.push(Span::styled(
                     super::collapsed_error_suffix(err, 48),
                     error_style,
@@ -786,10 +784,7 @@ mod tests {
             text.contains("does not exist"),
             "failed read should show reason, got '{text}'"
         );
-        assert_eq!(
-            text, "Read gone.rs — does not exist",
-            "got '{text}'"
-        );
+        assert_eq!(text, "Read gone.rs — does not exist", "got '{text}'");
     }
 
     #[test]
@@ -832,8 +827,7 @@ mod tests {
 
     #[test]
     fn expanded_failure_shows_full_error_body() {
-        let block =
-            ReadToolCallBlock::new("gone.rs").with_error("Permission denied: /secret/file");
+        let block = ReadToolCallBlock::new("gone.rs").with_error("Permission denied: /secret/file");
         let mut ctx = make_ctx();
         ctx.mode = DisplayMode::Expanded;
         let output = block.output(&ctx);
@@ -865,7 +859,8 @@ mod tests {
 
     #[test]
     fn expanded_failure_error_lines_are_selectable() {
-        let err = "Error: /tmp/gone.rs does not exist.\nNote: your current working directory is /tmp";
+        let err =
+            "Error: /tmp/gone.rs does not exist.\nNote: your current working directory is /tmp";
         let block = ReadToolCallBlock::new("/tmp/gone.rs").with_error(err);
         let mut ctx = make_ctx();
         ctx.mode = DisplayMode::Expanded;
@@ -944,12 +939,10 @@ mod tests {
         );
         let (first_idx, _) = range_lines[0];
         let (last_idx, last_line) = range_lines[range_lines.len() - 1];
-        let last_width = crate::scrollback::types::selectable_cols(
-            &last_line.content,
-            &last_line.selectable,
-        )
-        .map(|c| c.end.saturating_sub(c.start))
-        .unwrap_or(1);
+        let last_width =
+            crate::scrollback::types::selectable_cols(&last_line.content, &last_line.selectable)
+                .map(|c| c.end.saturating_sub(c.start))
+                .unwrap_or(1);
 
         let drag = ActiveTextDrag {
             anchor: RangeHit {

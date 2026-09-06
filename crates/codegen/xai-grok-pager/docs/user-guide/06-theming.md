@@ -229,6 +229,7 @@ vpad = false                    # Vertical padding around diffs
                                 # (flag on = collapsed one-liner); uncomment to pin either shape
 hunk_separator = "…"            # Separator between hunks ("…", "───", "⋯", or "" for none)
 dual_line_numbers = false       # Two-column line numbers (old + new, like GitHub)
+sticky_header = true            # Pin "Edit path" at the top of a tall scrolled diff
 # line_summary = false          # Show +N/-M in the collapsed header; unset follows the same flag
 # bg = "none"                   # Block background ("none", "light", "dark")
 ```

@@ -3593,3 +3593,57 @@ fn tool_media_overlay_exposes_filepath_click_rect() {
         "the image sits below its filepath line",
     );
 }
+
+fn tall_insert_hunk(n: usize) -> xai_grok_pager_diff::DiffHunk {
+    (1..=n)
+        .map(|i| xai_grok_pager_diff::DiffLine {
+            text: format!("line_{i}\n"),
+            lo: 0,
+            ln: i,
+            tag: similar::ChangeTag::Insert,
+        })
+        .collect()
+}
+
+/// A tall expanded Edit whose path header has scrolled off must still paint
+/// and select that header on the first visible row.
+#[test]
+fn scrolled_edit_pins_path_header_in_selection_model() {
+    let entry = ScrollbackEntry::new(RenderBlock::edit_with_hunks(
+        "src/long_file.rs",
+        vec![tall_insert_hunk(40)],
+    ))
+    .with_display_mode(DisplayMode::Expanded);
+    let viewport = Rect::new(0, 0, 80, 12);
+    let appearance = AppearanceConfig::default();
+    let layouts = compute_layouts(std::slice::from_ref(&entry), viewport.width, &appearance);
+    let height = layouts[0].height;
+    assert!(
+        height > 20,
+        "need a tall edit so skip_rows can hide the header, got {height}"
+    );
+
+    let (result, buf) =
+        render_with_scratch_and_buffer(std::slice::from_ref(&entry), viewport, 8, None);
+    let first = buffer_row_text(&buf, 0);
+    assert!(
+        first.contains("Edit") && first.contains("src/long_file.rs"),
+        "first painted row should be the pinned path header, got {first:?}"
+    );
+
+    let header_line = result
+        .selection_model
+        .ranges
+        .iter()
+        .flat_map(|range| range.lines.iter())
+        .find(|line| line.screen_y == 0)
+        .expect("pinned header must be in the selection model");
+    assert_eq!(
+        header_line.range_id, 0,
+        "pinned header keeps TOOL_HEADER_RANGE"
+    );
+    assert!(
+        header_line.text.contains("src/long_file.rs") || first.contains("src/long_file.rs"),
+        "selection text or painted row must carry the path"
+    );
+}

@@ -335,8 +335,7 @@ mod tests {
 
     #[test]
     fn foldable_when_error_even_without_output() {
-        let block =
-            ListDirToolCallBlock::new("missing").with_error("Permission denied: missing");
+        let block = ListDirToolCallBlock::new("missing").with_error("Permission denied: missing");
         assert!(block.is_foldable());
     }
 

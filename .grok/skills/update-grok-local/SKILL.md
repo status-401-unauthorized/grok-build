@@ -243,6 +243,30 @@ intent unless analysis shows upstream absorbed them:
    If upstream changes protoc discovery, `--dependency_out`, or pager-bin
    `build.rs`, keep the Windows PE skip, temp-file deps, and 8 MiB stack
    **and** every new upstream path. Never take a single side.
+5. **Sticky Edit path header** — when an expanded Edit diff is taller than
+   the viewport and scrolling would clip `"Edit path/to/file"` off the top,
+   pin that header line on the first visible row of the block (below any
+   user-prompt sticky header) so the file path stays visible. The header
+   pushes off with the block once there is no room for header + at least
+   one body row. Independent of `scrollback.display.sticky_headers`
+   (user-prompt pins). Config: `[scrollback.blocks.edit] sticky_header`
+   (default `true`) on `EditBlockConfig` / `RawEditBlockConfig`. Planner:
+   `scrollback/sticky_edit.rs` (`StickyEditHeaderPlan`). Paint:
+   `wrappers/entry_renderer.rs` (also re-paints the diamond bullet on the
+   pinned row). Selection / OSC-8 path-link mapping:
+   `scrollback/render.rs` must use the same `visible_lines` plan — never
+   take an upstream-only `.skip(content_skip)` that drops the pinned
+   header from hit-testing. Tests: `sticky_edit::tests::*`,
+   `expanded_edit_keeps_path_header_when_scrolled`,
+   `expanded_edit_header_scrolls_off_when_sticky_disabled`,
+   `expanded_edit_header_pushes_off_when_block_leaves_viewport`,
+   `scrolled_edit_pins_path_header_in_selection_model`.
+   **`EditBlockConfig` field-list conflicts:** when upstream adds a new
+   field next to fork-only `sticky_header` (example: another edit paint
+   flag), keep **both** `sticky_header` and every new upstream field on
+   the runtime struct, `RawEditBlockConfig`, `Default`, and `From`.
+   Never take a single side — upstream-only drops the pin; HEAD-only
+   fails to compile when a required field is missing.
 
 **`tracker.rs` test-extract conflicts:** upstream owns unit tests in
 `acp/tracker_tests.rs` (`#[cfg(test)]` + `#[path = "tracker_tests.rs"]
@@ -317,12 +341,26 @@ crates/build/xai-proto-build/src/lib.rs
 crates/codegen/xai-grok-pager-bin/build.rs
 ```
 
+**Sticky Edit path header** — if the upstream range touches Edit paint,
+entry clipping (`skip_rows`), scrollback selection mapping, or
+`EditBlockConfig` / `RawEditBlockConfig`, re-verify a tall expanded Edit
+still pins `"Edit path"` after the header would scroll off. Watch at least:
+
+```text
+crates/codegen/xai-grok-pager/src/scrollback/sticky_edit.rs
+crates/codegen/xai-grok-pager/src/scrollback/wrappers/entry_renderer.rs
+crates/codegen/xai-grok-pager/src/scrollback/render.rs
+crates/codegen/xai-grok-pager-render/src/appearance/config.rs
+```
+
 How to check (use the **commits being merged** — not
 `PRE_MERGE_HEAD..$UPSTREAM_REMOTE/main` and not a pre-fetch tip):
 
 `PRE_MERGE_HEAD..$UPSTREAM_REMOTE/main` is a tree comparison. When the fork
 already diverges in `tool/*`, `tracker.rs`, `tracker_tests.rs`, `spawn.rs`,
-turn-index UI paths, or Windows proto-build / pager-bin `build.rs`, those
+turn-index UI paths, Windows proto-build / pager-bin `build.rs`, or Edit
+sticky-header paths (`sticky_edit.rs`, `entry_renderer.rs`, `render.rs`,
+`EditBlockConfig`), those
 paths show up as “changed” even if upstream never touched them this sync.
 A pre-fetch tip equals the current xAI tip whenever those commits were
 already fetched but not merged — that range is then empty.
@@ -357,6 +395,14 @@ git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
   crates/build/xai-proto-build/src/find_protoc.rs \
   crates/build/xai-proto-build/src/lib.rs \
   crates/codegen/xai-grok-pager-bin/build.rs
+
+# Did this upstream sync touch Edit paint / clip / sticky-header config?
+git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
+  crates/codegen/xai-grok-pager/src/scrollback/sticky_edit.rs \
+  crates/codegen/xai-grok-pager/src/scrollback/wrappers/entry_renderer.rs \
+  crates/codegen/xai-grok-pager/src/scrollback/render.rs \
+  crates/codegen/xai-grok-pager/src/scrollback/blocks/tool/edit.rs \
+  crates/codegen/xai-grok-pager-render/src/appearance/config.rs
 ```
 
 If any pager watch paths appear, skim the upstream diff for selection ranges,
@@ -379,6 +425,24 @@ matches `/session-info` semantics.
 If proto-build or pager-bin `build.rs` appear, re-read the post-merge
 Windows branches; confirm the DotSlash wrapper is still skipped, deps
 still go to a temp file, and the 8 MiB stack link-arg is still emitted.
+
+**Sticky Edit path header** — if the upstream range touches Edit paint,
+entry clipping (`skip_rows`), scrollback selection mapping, or
+`EditBlockConfig` / `RawEditBlockConfig`, re-verify a tall expanded Edit
+still pins `"Edit path"` after the header would scroll off. Watch at least:
+
+```text
+crates/codegen/xai-grok-pager/src/scrollback/sticky_edit.rs
+crates/codegen/xai-grok-pager/src/scrollback/wrappers/entry_renderer.rs
+crates/codegen/xai-grok-pager/src/scrollback/render.rs
+crates/codegen/xai-grok-pager-render/src/appearance/config.rs
+```
+
+Confirm post-merge: `sticky_header` is still on both config structs
+(default true); `StickyEditHeaderPlan::visible_lines` still drives both
+paint and selection/link mapping; the diamond bullet still appears on
+the pinned row; every `EditBlockConfig` / `RawEditBlockConfig` literal
+still has both `sticky_header` and any upstream-only fields.
 
 Note outcomes in the fork-analysis section of the completion report
 (“adjacent re-check: pass / adapt needed” per theme, or “n/a — paths
@@ -539,8 +603,8 @@ next `/update-grok-local` stays accurate.
 | Remotes / branches | URL-based detection no longer finds xAI vs this fork, or tracking model changed |
 | Package / binary paths | `xai-grok-pager-bin`, artifact path, or `grok-local` wiring changed |
 | Version sources | Semver crate, `build.rs` embed, or channel labeling changed |
-| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, or Windows proto-build / pager stack, or a new deliberate fork theme appeared |
-| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, or Windows proto-build / pager stack (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, …) |
+| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, Windows proto-build / pager stack, or sticky Edit path header, or a new deliberate fork theme appeared |
+| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, Windows proto-build / pager stack, or sticky Edit path header (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, `sticky_edit.rs`, `entry_renderer.rs`, `EditBlockConfig`, …) |
 | Build / verify procedure | Toolchain, timeouts, env vars (`HERDR_AGENT`, `GROK_VERSION`), or pass criteria wrong |
 | Safety / push policy | Process friction that should become an explicit rule |
 | Operational gaps | Something non-obvious burned time this run and belongs in the skill |
@@ -569,8 +633,9 @@ Summarize for the user:
 3. **Fork analysis:** each delta → keep / adapt / drop + one-line rationale;
    include **adjacent re-check** results when upstream touched clipboard /
    selection / tool-block paths, session spawn / plugin-hook wiring,
-   turn-index (bubble + composer) paths, and/or Windows proto-build /
-   pager-bin `build.rs` (or “n/a — paths untouched” per theme).
+   turn-index (bubble + composer) paths, Windows proto-build /
+   pager-bin `build.rs`, and/or Edit sticky-header paint/clip/config
+   (or “n/a — paths untouched” per theme).
 4. **Code adjustments:** what was implemented after analysis (or “none”).
 5. **Build:** success / fail / **skipped — no upstream commits merged**,
    package `xai-grok-pager-bin`, binary path + mtime (existing binary when
