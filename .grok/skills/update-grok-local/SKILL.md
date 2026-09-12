@@ -3,19 +3,20 @@ name: update-grok-local
 description: >
   Sync this fork’s main from the xAI upstream remote (detect by URL, not
   remote name), resolve and analyze merge conflicts for fork-specific
-  changes, rebuild xai-grok-pager only when upstream commits were merged,
-  and verify grok-local version. Use when the user runs /update-grok-local,
-  says “update grok-local”, “sync upstream into fork”, “refresh local grok
-  build”, or wants to pull monorepo main and rebuild the local binary.
+  changes, rebuild xai-grok-pager only when this run landed new upstream
+  commits, and verify grok-local version. Use when the user runs
+  /update-grok-local, says “update grok-local”, “sync upstream into fork”,
+  “refresh local grok build”, or wants to pull monorepo main and rebuild
+  the local binary.
 metadata:
-  short-description: "Sync xAI main → fork; rebuild only if commits merged"
+  short-description: "Sync xAI main → fork; rebuild if new upstream landed"
 ---
 
 # /update-grok-local — Sync upstream, preserve fork deltas, rebuild if needed
 
 End-to-end workflow to pull the xAI upstream `main` into this fork’s `main`,
 keep or adapt fork-only changes after conflict analysis, rebuild the local
-binary **only when this run merged upstream commits**, confirm
+binary **only when this run landed new upstream commits**, confirm
 `grok-local version` (against the just-built binary after a rebuild, or the
 existing binary when the rebuild was skipped), then **review this skill**
 for vital updates and show any suggestions to the user before closing.
@@ -35,7 +36,9 @@ Run from the **grok-build** repo root (the tree that contains
    - If WIP looks intentional, **stop and ask** before discarding or stashing.
 3. Preferred branch: local `main` tracking `$FORK_REMOTE/main`. If on another
    branch, tell the user and ask whether to switch to `main` or update the
-   current branch instead.
+   current branch instead. After fetch (Step 1), fast-forward onto
+   `$FORK_REMOTE/main` when that is FF-safe — do not merge the xAI tip into a
+   stale local `main` that the fork already merged.
 
 Record before any mutation:
 
@@ -44,6 +47,8 @@ git remote -v
 git status -sb
 git rev-parse --abbrev-ref HEAD
 git rev-parse --short HEAD
+RUN_START_HEAD=$(git rev-parse HEAD)
+echo "RUN_START_HEAD=$RUN_START_HEAD"
 
 # Detect remotes by fetch URL. Names vary (this clone: upstream=xAI, origin=fork).
 UPSTREAM_REMOTE=$(git remote -v | awk '/github.com[:/]xai-org\/grok-build/ && /fetch/ {print $1; exit}')
@@ -68,8 +73,8 @@ compare, and push.
 
 Merge **upstream into local main**, then (only if user asks or skill is run
 with push intent) update `$FORK_REMOTE/main`. Default of this skill:
-**local merge; build only if this run merged upstream commits**; do **not**
-`git push` without explicit user approval.
+**local merge; build only if this run landed new upstream commits**; do
+**not** `git push` without explicit user approval.
 
 ## Steps
 
@@ -77,24 +82,45 @@ with push intent) update `$FORK_REMOTE/main`. Default of this skill:
 
 ```bash
 git fetch "$UPSTREAM_REMOTE" main
-# Optional but useful for comparison:
 git fetch "$FORK_REMOTE" main
 ```
 
-Show how far behind the xAI tip:
+If `HEAD` is a **strict ancestor** of `$FORK_REMOTE/main` (behind and FF-safe):
 
 ```bash
-git log --oneline --left-right --cherry-pick HEAD..."$UPSTREAM_REMOTE/main" | head -40
-git rev-list --left-right --count HEAD..."$UPSTREAM_REMOTE/main"
+git merge --ff-only "$FORK_REMOTE/main"
 ```
 
-If already up to date with `$UPSTREAM_REMOTE/main` (0 commits to merge), skip
-merge, conflict, analysis, **and build**. Jump to **Step 7 (version report)**
-for the existing binary, then **Step 8**. Do **not** rebuild unless the user
-explicitly asked to rebuild anyway.
+Do **not** merge `$UPSTREAM_REMOTE/main` into a stale local tip that the fork
+already merged — that creates a duplicate merge next to the fork’s existing
+one. If local `main` has commits not on `$FORK_REMOTE/main` (not FF-safe),
+**stop and ask** (merge, rebase, or leave).
 
-A previously fetched but unmerged tip still has commits to merge — do not treat
-“fetch did not move the remote-tracking ref” as “already up to date.”
+Show how far the **start-of-run** tip is behind the xAI tip:
+
+```bash
+git log --oneline --left-right --cherry-pick "$RUN_START_HEAD"..."$UPSTREAM_REMOTE/main" | head -40
+git rev-list --left-right --count "$RUN_START_HEAD"..."$UPSTREAM_REMOTE/main"
+NEW_UPSTREAM=$(git rev-list --count "$RUN_START_HEAD".."$UPSTREAM_REMOTE/main")
+echo "NEW_UPSTREAM=$NEW_UPSTREAM"
+```
+
+`NEW_UPSTREAM` is the rebuild trigger (see Step 6). It counts xAI commits
+that were not reachable from `RUN_START_HEAD` — a local merge **or** a
+fast-forward onto a fork tip that already contains those commits.
+
+A previously fetched but unmerged tip still has `NEW_UPSTREAM > 0` — do not
+treat “fetch did not move the remote-tracking ref” as “already up to date.”
+
+Then:
+
+- **`NEW_UPSTREAM` is 0** — working tree already contained the xAI tip
+  before this run. Skip merge, conflict, analysis, **and build**. Jump to
+  **Step 7**, then **Step 8**. Rebuild only if the user explicitly asked.
+- **`NEW_UPSTREAM` > 0 and `HEAD` already contains `$UPSTREAM_REMOTE/main`**
+  (typical after FF of a fork that already merged the xAI tip) — skip merge,
+  conflict, and analysis. Continue to **Step 6** and rebuild.
+- **`HEAD` does not contain `$UPSTREAM_REMOTE/main`** — continue to Step 2.
 
 ### 2. Merge upstream main into local main
 
@@ -113,8 +139,8 @@ Commit message style used in this repo when wrapping merges:
 Merge <upstream-remote>/main: sync monorepo into fork; <brief note of preserved fork deltas>
 ```
 
-If `git merge` reports “Already up to date” (0 commits merged), skip
-Steps 3–6 and jump to Step 7, then Step 8. Do **not** rebuild.
+If `git merge` reports “Already up to date”, skip Steps 3–5. Rebuild only
+when `NEW_UPSTREAM > 0` (Step 6); otherwise jump to Step 7, then Step 8.
 
 If the merge completes cleanly **and brought in upstream commits**, note
 “no conflicts” and continue to Step 4 with a light fork-delta review
@@ -461,35 +487,48 @@ If Step 4 requires code changes beyond pure conflict resolution:
 
 ### 6. Build the local binary
 
-**Skip the rebuild** when this run merged **zero** commits from upstream
-(already up to date after fetch, or `git merge` reported “Already up to
-date”). Do not run `cargo build`. Record
-`Build: skipped — no upstream commits merged` and continue to Step 7
+**Skip the rebuild** only when `NEW_UPSTREAM` is 0 (this working tree did
+not gain any xAI commits this run). Do not run `cargo build`. Record
+`Build: skipped — no new upstream commits landed` and continue to Step 7
 (report the existing binary) then Step 8.
+
+**Rebuild** when `NEW_UPSTREAM > 0`, including the case where
+`git merge "$UPSTREAM_REMOTE/main"` is already up to date because a
+fast-forward of `$FORK_REMOTE/main` already contained those commits.
 
 Exception: rebuild anyway only if the user explicitly requested a rebuild
 regardless of sync result (e.g. “rebuild anyway”, “refresh the binary”).
 
-`grok-local` is expected to point at the **release** pager binary in this tree
-(typically via `~/.bash_aliases`):
+`grok-local` must point at this tree’s **release** pager binary.
+
+Discover the command if the current shell has it (non-interactive shells
+often do not):
 
 ```bash
-# Discover alias target if present (non-interactive shells may need to
-# source ~/.bash_aliases first)
+# Unix: source ~/.bash_aliases if needed
 alias grok-local 2>/dev/null || true
 type grok-local 2>/dev/null || true
 ```
 
-Expected alias / default artifact:
-
-```text
-alias grok-local='HERDR_AGENT=grok $REPO/target/release/xai-grok-pager'
-$REPO/target/release/xai-grok-pager
+```powershell
+# Windows: $PROFILE / scripts/GrokLocal.profile.ps1 may define grok-local;
+# agent shells usually have not loaded it.
+Get-Command grok-local -ErrorAction SilentlyContinue
 ```
 
-Build the **release** profile so the alias target is the binary just linked.
-Do not `cargo build` (debug) and then verify via `grok-local` — that pair
-leaves the release binary stale.
+Release artifact (same path the command must target):
+
+```text
+$REPO/target/release/xai-grok-pager       # Unix
+$REPO/target/release/xai-grok-pager.exe   # Windows
+```
+
+Typical Unix alias: `HERDR_AGENT=grok $REPO/target/release/xai-grok-pager`.
+On Windows, if `scripts/Build-GrokLocal.ps1` is present, that is the local
+release build / profile-register helper — do not require it.
+
+Build the **release** profile so the command target is the binary just
+linked. Do not `cargo build` (debug) and then verify via `grok-local`.
 
 ```bash
 cargo build --release -p xai-grok-pager-bin
@@ -502,14 +541,19 @@ If the build fails:
 
 1. Fix compile errors caused by the merge/adaptation.
 2. Rebuild until success.
-3. Do not claim success without a successful link of
-   `target/release/xai-grok-pager`.
+3. Do not claim success without a successful link of the release artifact
+   above (`xai-grok-pager` / `xai-grok-pager.exe`).
 
-If `grok-local` is missing from the current shell, use the explicit release
-path (do not fall back to `target/debug/`):
+If `grok-local` is missing from the current shell, invoke the release
+artifact with `HERDR_AGENT=grok` (do not fall back to `target/debug/`):
 
 ```bash
 HERDR_AGENT=grok "$REPO/target/release/xai-grok-pager" version
+```
+
+```powershell
+$env:HERDR_AGENT = 'grok'
+& "$REPO\target\release\xai-grok-pager.exe" version
 ```
 
 ### 7. Verify version string
@@ -548,8 +592,8 @@ SHORT=$(git rev-parse --short HEAD)
 COMMIT12=$(git rev-parse HEAD | cut -c1-12)
 echo "Expected semver: $EXPECTED  stamp: $COMMIT12  --short: $SHORT"
 
-# Prefer alias when available (source ~/.bash_aliases if needed).
-# Fallback must be the release binary — same path the alias targets.
+# Prefer grok-local when the current shell has it (Step 6).
+# Fallback must be the release artifact — .exe on Windows.
 if alias grok-local >/dev/null 2>&1 || command -v grok-local >/dev/null 2>&1; then
   OUT=$(grok-local version 2>&1)
 else
@@ -563,6 +607,9 @@ echo "$OUT"
 echo "$OUT" | grep -F "$EXPECTED" && echo "$OUT" | grep -F "$COMMIT12"
 ```
 
+On Windows without `grok-local` loaded, use
+`target\release\xai-grok-pager.exe` (see Step 6).
+
 When the rebuild **ran**:
 
 **Pass:** `grok-local version` (or equivalent path) shows `grok $EXPECTED ($COMMIT12) …`
@@ -571,14 +618,14 @@ When the rebuild **ran**:
 
 - Still shows an older semver (stale binary / wrong path).
 - Commit hash is an old build’s hash (binary not rebuilt after merge).
-- Binary path is not the one just built (check alias →
-  `target/release/xai-grok-pager`, not `target/debug/`).
+- Binary path is not the one just built (check command →
+  `target/release/xai-grok-pager` / `.exe`, not `target/debug/`).
 
-On fail: confirm alias path, `ls -l` binary mtime, rebuild with
+On fail: confirm command path, binary mtime, rebuild with
 `cargo clean -p xai-grok-pager-bin` only if incremental link is wrong, then
 re-run verification.
 
-When the rebuild was **skipped** (no upstream commits merged): report the
+When the rebuild was **skipped** (`NEW_UPSTREAM` is 0): report the
 existing `grok-local version` line vs `$EXPECTED ($COMMIT12)`. If they differ,
 note the mismatch and that the binary was left as-is — do **not** rebuild
 unless the user asks.
@@ -628,7 +675,9 @@ next `/update-grok-local` stays accurate.
 
 Summarize for the user:
 
-1. **Sync:** pre/post SHAs (`HEAD`, `$UPSTREAM_REMOTE/main`), commits merged count.
+1. **Sync:** pre/post SHAs (`RUN_START_HEAD`, `HEAD`, `$UPSTREAM_REMOTE/main`),
+   `NEW_UPSTREAM` count, and whether local `main` was fast-forwarded onto
+   `$FORK_REMOTE/main`.
 2. **Conflicts:** files (or “none”), resolution summary.
 3. **Fork analysis:** each delta → keep / adapt / drop + one-line rationale;
    include **adjacent re-check** results when upstream touched clipboard /
@@ -637,7 +686,7 @@ Summarize for the user:
    pager-bin `build.rs`, and/or Edit sticky-header paint/clip/config
    (or “n/a — paths untouched” per theme).
 4. **Code adjustments:** what was implemented after analysis (or “none”).
-5. **Build:** success / fail / **skipped — no upstream commits merged**,
+5. **Build:** success / fail / **skipped — no new upstream commits landed**,
    package `xai-grok-pager-bin`, binary path + mtime (existing binary when
    skipped).
 6. **Version check:** full `grok-local version` line vs expected
@@ -655,8 +704,9 @@ Summarize for the user:
   unrecoverable state.
 - Do not skip Step 4 (analysis) when there were conflicts or unique fork
   commits.
-- Do not rebuild when this run merged zero commits from upstream, unless the
-  user explicitly asked to rebuild anyway.
+- Do not rebuild when `NEW_UPSTREAM` is 0, unless the user explicitly asked
+  to rebuild anyway. Do not skip the rebuild when this run fast-forwarded
+  onto upstream commits that the fork already merged.
 - After a rebuild, do not claim version success without running the version
   command against the binary that was just built. After a skipped rebuild,
   report the existing binary’s version; do not claim it was just built.
@@ -668,13 +718,18 @@ Summarize for the user:
 ```bash
 # Full happy path (agent expands conflict/analysis + skill review as needed)
 # UPSTREAM_REMOTE / FORK_REMOTE: detect by URL (see Preconditions)
+RUN_START_HEAD=$(git rev-parse HEAD)
 git fetch "$UPSTREAM_REMOTE" main
+git fetch "$FORK_REMOTE" main
+# If HEAD is a strict ancestor of $FORK_REMOTE/main: git merge --ff-only
 git checkout main
 PRE_MERGE_HEAD=$(git rev-parse HEAD)
+NEW_UPSTREAM=$(git rev-list --count "$RUN_START_HEAD".."$UPSTREAM_REMOTE/main")
 git merge "$UPSTREAM_REMOTE/main"   # resolve + analyze if needed
-# If 0 commits merged from upstream: skip cargo build; report existing version
+# NEW_UPSTREAM=0: skip cargo build; report existing version
+# NEW_UPSTREAM>0 after FF of a fork that already merged the xAI tip: still rebuild
 # Adjacent re-check: git diff --name-only $(git merge-base $PRE_MERGE_HEAD $UPSTREAM_REMOTE/main)..$UPSTREAM_REMOTE/main -- <watch paths>
-cargo build --release -p xai-grok-pager-bin   # only if this run merged upstream commits
-grok-local version      # or HERDR_AGENT=grok ./target/release/xai-grok-pager version
+cargo build --release -p xai-grok-pager-bin   # only if NEW_UPSTREAM>0
+grok-local version      # or HERDR_AGENT=grok ./target/release/xai-grok-pager[.exe] version
 # then: re-read this SKILL.md → report skill-review suggestions (or none)
 ```
