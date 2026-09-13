@@ -983,6 +983,12 @@ pub(crate) fn format_subagent_meta(
     }
 }
 
+/// Shared `Session ID: …` label for the child fullscreen chrome and the
+/// parent subagent block's expanded body. Matches `/session-info`.
+pub(crate) fn format_session_id_line(session_id: &str) -> String {
+    format!("Session ID: {session_id}")
+}
+
 /// Concise display label for the subagent scrollback block and the fullscreen title bar.
 /// Callers handle the `None` activity separately.
 pub(crate) fn format_activity_label(activity: &crate::acp::tracker::TurnActivity) -> String {

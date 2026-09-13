@@ -1380,6 +1380,8 @@ pub struct AgentView {
     pub is_subagent_view: bool,
     /// Hit area for the [✗] close button in the subagent frame title bar.
     pub hit_subagent_frame_close: HitArea,
+    /// Hit area for the session-id chrome row in the subagent frame (click copies).
+    pub hit_subagent_session_id: HitArea,
     /// Whether the `/share` slash command is available (mirrors
     /// `AppView::sharing_enabled`). Used to gate palette entries.
     pub sharing_enabled: bool,

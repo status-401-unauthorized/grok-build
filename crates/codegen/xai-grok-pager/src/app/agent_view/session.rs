@@ -367,6 +367,7 @@ impl AgentView {
             active_subagent: None,
             is_subagent_view: false,
             hit_subagent_frame_close: Default::default(),
+            hit_subagent_session_id: Default::default(),
             sharing_enabled: false,
             memory_mode: None,
             billing_surface_visible: false,
@@ -419,6 +420,22 @@ impl AgentView {
     /// Establish read-only child identity before a view is stored or opened.
     pub(crate) fn mark_as_subagent_view(&mut self) {
         self.is_subagent_view = true;
+    }
+
+    /// Copy this view's session ID to the clipboard. Used by the child-window
+    /// `c` shortcut and by a click on the session-id chrome row.
+    pub(crate) fn copy_session_id_to_clipboard(&mut self) -> bool {
+        let text = self
+            .session
+            .session_id
+            .as_ref()
+            .map(|sid| sid.0.to_string())
+            .filter(|s| !s.is_empty());
+        let Some(text) = text else {
+            return false;
+        };
+        self.copy_to_clipboard(&text);
+        true
     }
     /// Register a child view and establish its read-only subagent identity.
     pub(crate) fn insert_subagent_view(

@@ -966,6 +966,9 @@ impl RenderBlock {
             RenderBlock::ToolCall(ToolCallBlock::WebSearch(b)) => Some(b.query.clone()),
             RenderBlock::ToolCall(ToolCallBlock::Search(b)) => Some(b.pattern.clone()),
             RenderBlock::BgTask(b) => Some(b.command.clone()),
+            RenderBlock::Subagent(b) if !b.child_session_id.is_empty() => {
+                Some(b.child_session_id.clone())
+            }
             _ => None,
         }
     }
@@ -998,6 +1001,7 @@ impl RenderBlock {
                 join_searchable([
                     Some(b.description.clone()),
                     Some(b.subagent_type.clone()),
+                    Some(b.child_session_id.clone()),
                     b.persona.clone(),
                     b.role.clone(),
                     b.model.clone(),
@@ -1025,6 +1029,7 @@ impl RenderBlock {
             RenderBlock::ToolCall(ToolCallBlock::WebFetch(_)) => Some("copy url"),
             RenderBlock::ToolCall(ToolCallBlock::WebSearch(_)) => Some("copy query"),
             RenderBlock::ToolCall(ToolCallBlock::Search(_)) => Some("copy pattern"),
+            RenderBlock::Subagent(b) if !b.child_session_id.is_empty() => Some("copy session"),
             _ => None,
         }
     }
@@ -1426,12 +1431,28 @@ mod searchable_text_tests {
         }
         let text = block.searchable_text().expect("subagent text");
         assert!(text.contains("investigate flaky test"), "got: {text:?}");
+        assert!(text.contains("child-1"), "got: {text:?}");
         assert!(text.contains("explore"), "got: {text:?}");
         assert!(text.contains("scout"), "got: {text:?}");
         assert!(text.contains("researcher"), "got: {text:?}");
         assert!(text.contains("grok-test"), "got: {text:?}");
         assert!(text.contains("Running: cargo build"), "got: {text:?}");
         assert!(text.contains("panicked at assert"), "got: {text:?}");
+    }
+
+    #[test]
+    fn subagent_copy_meta_is_child_session_id() {
+        let block = RenderBlock::Subagent(SubagentBlock::started(
+            "scan src",
+            "child-sess-copy",
+            "explore",
+            None,
+            None,
+            None,
+            false,
+        ));
+        assert_eq!(block.copy_meta().as_deref(), Some("child-sess-copy"));
+        assert_eq!(block.copy_meta_label(), Some("copy session"));
     }
 
     #[test]

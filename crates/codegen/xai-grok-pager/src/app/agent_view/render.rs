@@ -746,6 +746,40 @@ impl AgentView {
                 badge.width() as u16,
             );
         }
+        // Session ID is chrome, not a child-scrollback block: seeding the view
+        // would make it non-empty and skip transcript replay.
+        // Click / `c` copies the id (see hit_subagent_session_id).
+        let inner = if inner.height > 0 && !child_sid.is_empty() {
+            let sid_label = crate::app::subagent::format_session_id_line(child_sid);
+            let sid_max = inner.width.saturating_sub(1) as usize;
+            let sid_display = crate::render::line_utils::truncate_str(&sid_label, sid_max);
+            let sid_width = sid_display.width() as u16;
+            let sid_x = inner.x + 1;
+            let sid_style = if self.hit_subagent_session_id.hovered {
+                Style::default()
+                    .fg(theme.text_primary)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            buf.set_span_safe(
+                sid_x,
+                inner.y,
+                &Span::styled(&sid_display, sid_style),
+                sid_width,
+            );
+            self.hit_subagent_session_id.rect =
+                Some(Rect::new(sid_x, inner.y, sid_width.max(1), 1));
+            Rect {
+                x: inner.x,
+                y: inner.y.saturating_add(1),
+                width: inner.width,
+                height: inner.height.saturating_sub(1),
+            }
+        } else {
+            self.hit_subagent_session_id.clear();
+            inner
+        };
         let mut child_post_flush = None;
         if inner.width > 5
             && inner.height > 3
@@ -4927,6 +4961,64 @@ mod overlay_post_flush_tests {
         post_flush.write_to(&mut Vec::new()).unwrap();
         let after_emit = crate::terminal::overlay::static_image(&png(), 20, 10, 0, 0, 41).unwrap();
         assert!(after_emit.as_str().contains("a=T"));
+    }
+
+    fn buffer_text(buf: &Buffer) -> String {
+        (buf.area.top()..buf.area.bottom())
+            .map(|y| {
+                (buf.area.left()..buf.area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn fullscreen_subagent_shows_session_id_as_soon_as_session_exists() {
+        let mut parent = make_agent();
+        let child_sid = "child-sess-chrome";
+        let mut child = make_agent();
+        child.session.session_id = Some(child_sid.into());
+        child.mark_as_subagent_view();
+        parent
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+        parent.active_subagent = Some(child_sid.to_string());
+
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = parent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Session ID: child-sess-chrome"),
+            "child fullscreen must show the session id immediately:\n{text}"
+        );
+        assert!(
+            child_view_scrollback_empty_after_draw(&parent, child_sid),
+            "session id chrome must not seed the child scrollback (replay would skip)"
+        );
+    }
+
+    fn child_view_scrollback_empty_after_draw(parent: &super::AgentView, child_sid: &str) -> bool {
+        parent
+            .subagent_views
+            .get(child_sid)
+            .is_some_and(|child| child.scrollback.is_empty())
     }
     #[test]
     fn active_modal_returns_clear_without_committing_discarded_state() {

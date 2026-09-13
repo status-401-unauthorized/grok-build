@@ -1,5 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
+    use crate::scrollback::block::BlockContent;
 
     #[test]
     fn replayed_subagent_finished_marks_orphan_terminal() {
@@ -378,6 +379,10 @@
             panic!("SubagentSpawned must push a SubagentBlock to parent scrollback");
         };
         assert_eq!(sb.child_session_id, child_sid);
+        assert!(
+            sb.is_foldable(),
+            "parent subagent block must expand to show the child session id"
+        );
         assert!(matches!(sb.kind, SubagentBlockKind::Started));
         assert!(agent.scrollback.needs_animation());
 

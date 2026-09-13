@@ -816,6 +816,12 @@ fn rendered_verb_group_folds_subagent_row_and_expansion_keeps_activity() {
             .any(|r| r.contains("Subagent") && r.contains("\u{00b7} Thinking")),
         "expanded member row must keep the activity suffix: {member_rows:?}"
     );
+    assert!(
+        member_rows
+            .iter()
+            .any(|r| r.contains("Session ID: child-A")),
+        "expanded verb group must show the child session id on the member row: {member_rows:?}"
+    );
 }
 
 /// Render a prepared state, feeding the fold's spans when `with_spans`.

@@ -1026,6 +1026,9 @@ pub fn build_hints(
     {
         hints.push(HintItem::new(key, "send to bg"));
     }
+    if is_subagent_view {
+        hints.push(HintItem::new(crate::key!('c'), "copy session"));
+    }
     hints
 }
 #[cfg(test)]
