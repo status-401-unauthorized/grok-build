@@ -273,12 +273,22 @@ intent unless analysis shows upstream absorbed them:
    info block is expanded. Do **not** seed the child's scrollback with a
    system/session-info line: `ensure_subagent_child_replayed` only replays
    into an empty view, so a spawn-time block would skip transcript replay.
-   Chrome is painted in `draw_subagent_fullscreen` (`app/agent_view/render.rs`)
-   via `format_session_id_line` (`app/subagent.rs`) on the first content row
-   under the title. The chrome line is copyable: click it, or press `c`
-   (`copy session` hint) in the child window
-   (`copy_session_id_to_clipboard`). Never take an upstream-only chrome
-   paint that drops the hit area / `c` binding. Parent block: `scrollback/blocks/subagent.rs` is foldable
+   Chrome is painted in `draw_subagent_fullscreen`
+   (`app/agent_view/subagent_takeover.rs`) via `format_session_id_line`
+   (`app/subagent.rs`) on the first content row under the title. Click and
+   `c` (`copy session` hint) are handled in `intercept_takeover_input` in
+   the same file (`copy_session_id_to_clipboard`). Never take an
+   upstream-only chrome paint that drops the hit area / `c` binding.
+   Children are stamped by `insert_subagent_view` → `AgentRole::Child` /
+   `ViewSurface::ChildTakeover` (there is no `is_subagent_view` flag or
+   `mark_as_subagent_view`). The copy-session hint keys off
+   `surface == ViewSurface::ChildTakeover`. Tests that insert a child must
+   use `insert_test_child` (or `insert_subagent_view`), not a raw
+   `subagent_views.insert`. If upstream extracts takeover into a new
+   module again, port chrome / click / `c` there — do **not** keep the
+   old `draw_subagent_fullscreen` in `render.rs` (that produces a
+   misplaced-function conflict inside whatever replaced it, e.g.
+   `overlay_stop_label`). Parent block: `scrollback/blocks/subagent.rs` is foldable
    when `child_session_id` is non-empty. The collapsed one-line header
    includes ` · Session ID: {id}` so expanding a verb group
    (`Ran 2 subagents`) reveals the ids on the member rows (members stay
@@ -303,7 +313,11 @@ intent unless analysis shows upstream absorbed them:
 mod tests;`). If a conflict is inline `mod tests { … }` vs that path
 attribute, **take the extract** and **port** any fork-only tests into
 `tracker_tests.rs`. Do not keep the inline module — the next upstream
-sync will re-conflict a multi-thousand-line test blob.
+sync will re-conflict a multi-thousand-line test blob. When keeping or
+porting fork tests, match current helper signatures (`cargo check --lib`
+can stay green while `cargo test --lib` fails). Example: `tool_call_to_block`
+now takes `&SubagentLabelRegistry` — pass `&SubagentLabelRegistry::default()`
+at fork call sites.
 
 **Adjacent re-check (even with a clean merge / no fork-file conflicts):**
 fork intent can break without a Git conflict on the fork files themselves.
@@ -389,6 +403,8 @@ the child session id still appears immediately in the output window and on
 the expanded parent block. Watch at least:
 
 ```text
+crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover.rs
+crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover_tests.rs
 crates/codegen/xai-grok-pager/src/app/agent_view/render.rs
 crates/codegen/xai-grok-pager/src/scrollback/blocks/subagent.rs
 crates/codegen/xai-grok-pager/src/scrollback/block.rs
@@ -403,8 +419,8 @@ How to check (use the **commits being merged** — not
 already diverges in `tool/*`, `tracker.rs`, `tracker_tests.rs`, `spawn.rs`,
 turn-index UI paths, Windows proto-build / pager-bin `build.rs`, Edit
 sticky-header paths (`sticky_edit.rs`, `entry_renderer.rs`, `render.rs`,
-`EditBlockConfig`), or subagent session-id paths (`draw_subagent_fullscreen`,
-`scrollback/blocks/subagent.rs`), those
+`EditBlockConfig`), or subagent session-id paths (`subagent_takeover.rs`,
+`draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`), those
 paths show up as “changed” even if upstream never touched them this sync.
 A pre-fetch tip equals the current xAI tip whenever those commits were
 already fetched but not merged — that range is then empty.
@@ -450,6 +466,8 @@ git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
 
 # Did this upstream sync touch subagent session-id chrome / parent block?
 git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
+  crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover.rs \
+  crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover_tests.rs \
   crates/codegen/xai-grok-pager/src/app/agent_view/render.rs \
   crates/codegen/xai-grok-pager/src/scrollback/blocks/subagent.rs \
   crates/codegen/xai-grok-pager/src/scrollback/block.rs \
@@ -502,6 +520,8 @@ the child session id still appears immediately in the output window and on
 the expanded parent block. Watch at least:
 
 ```text
+crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover.rs
+crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover_tests.rs
 crates/codegen/xai-grok-pager/src/app/agent_view/render.rs
 crates/codegen/xai-grok-pager/src/scrollback/blocks/subagent.rs
 crates/codegen/xai-grok-pager/src/scrollback/block.rs
@@ -509,16 +529,19 @@ crates/codegen/xai-grok-pager/src/app/subagent.rs
 crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
 ```
 
-Confirm post-merge: `draw_subagent_fullscreen` still paints
-`format_session_id_line(child_sid)` as chrome (not a child scrollback
-block) as soon as the child session exists; the chrome row is still
-click-to-copy (`hit_subagent_session_id`) and `c` still copies via
-`copy_session_id_to_clipboard`; collapsed SubagentBlock
-headers still include ` · Session ID: {id}` (so `Ran N subagents`
-expansion shows the ids); `SubagentBlock` is still foldable when
-`child_session_id` is set; expanded output still includes
+Confirm post-merge: `draw_subagent_fullscreen` in `subagent_takeover.rs`
+still paints `format_session_id_line(child_sid)` as chrome (not a child
+scrollback block) as soon as the child session exists; `intercept_takeover_input`
+still handles click-to-copy (`hit_subagent_session_id`) and `c` via
+`copy_session_id_to_clipboard`; children are still `ViewSurface::ChildTakeover`
+via `insert_subagent_view` / `insert_test_child` (not `is_subagent_view`);
+collapsed SubagentBlock headers still include ` · Session ID: {id}` (so
+`Ran N subagents` expansion shows the ids); `SubagentBlock` is still
+foldable when `child_session_id` is set; expanded output still includes
 `Session ID: {id}`; `copy_meta` still returns the child session id.
-Never seed the child view's scrollback at spawn to show the id.
+Never seed the child view's scrollback at spawn to show the id. If
+takeover paint/input moved again, follow the function — do not restore
+it in `render.rs`.
 
 Note outcomes in the fork-analysis section of the completion report
 (“adjacent re-check: pass / adapt needed” per theme, or “n/a — paths
@@ -680,7 +703,7 @@ next `/update-grok-local` stays accurate.
 | Package / binary paths | `xai-grok-pager-bin`, artifact path, or `grok-local` wiring changed |
 | Version sources | Semver crate, `build.rs` embed, or channel labeling changed |
 | Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, Windows proto-build / pager stack, sticky Edit path header, or subagent session ID UI, or a new deliberate fork theme appeared |
-| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, Windows proto-build / pager stack, sticky Edit path header, or subagent session ID UI (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, `sticky_edit.rs`, `entry_renderer.rs`, `EditBlockConfig`, `draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`, …) |
+| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, Windows proto-build / pager stack, sticky Edit path header, or subagent session ID UI (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, `sticky_edit.rs`, `entry_renderer.rs`, `EditBlockConfig`, `subagent_takeover.rs`, `draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`, …) |
 | Build / verify procedure | Toolchain, timeouts, env vars (`HERDR_AGENT`, `GROK_VERSION`), or pass criteria wrong |
 | Safety / push policy | Process friction that should become an explicit rule |
 | Operational gaps | Something non-obvious burned time this run and belongs in the skill |
@@ -711,7 +734,7 @@ Summarize for the user:
    selection / tool-block paths, session spawn / plugin-hook wiring,
    turn-index (bubble + composer) paths, Windows proto-build /
    pager-bin `build.rs`, Edit sticky-header paint/clip/config, and/or
-   subagent session-id chrome / parent SubagentBlock
+   subagent session-id chrome (`subagent_takeover.rs`) / parent SubagentBlock
    (or “n/a — paths untouched” per theme).
 4. **Code adjustments:** what was implemented after analysis (or “none”).
 5. **Build:** success / fail / **skipped — no upstream commits merged**,
