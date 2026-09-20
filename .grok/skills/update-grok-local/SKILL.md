@@ -195,6 +195,14 @@ intent unless analysis shows upstream absorbed them:
    (look for `append_specs` / “merged plugin hooks into session registry at
    spawn”). Upstream still wires plugin hooks mainly on reload; preserve the
    spawn-time merge unless upstream lands an equivalent.
+   **`spawn_step!` instrumentation conflicts:** when upstream replaces
+   `tracing::info_span!("spawn.hooks_discovery").entered()` with
+   `spawn_step!("hooks_discovery")` (or further spawn timer/span macros),
+   keep the plugin `append_specs` merge **inside** that step (`mut
+   built_hook_registry`) **and** drop the upstream guard name
+   (`hooks_discovery`). Never take a single side — upstream-only drops
+   spawn-time plugin hooks; HEAD-only (`hooks_discovery_span` / `info_span`)
+   re-conflicts on the next spawn-timer rename.
 3. **Session turn index UI** — show the 0-based `/session-info` `Turn: N`
    index on (a) plain user-prompt **scrollback bubbles** and (b) the
    **composer** input prefix (`❯ Turn N …`). Plain prompts only (not bash,
@@ -486,7 +494,10 @@ accept an upstream-only short label that discards `old_string`.
 
 If `spawn.rs` (or related hook/plugin helpers) appear, skim the upstream
 diff and re-read the post-merge spawn hook-registry block; confirm plugin
-hooks are still appended at spawn (not only on reload).
+hooks are still appended at spawn (not only on reload), still sit inside
+the current spawn step (`spawn_step!("hooks_discovery")` or whatever
+replaced it), and drop the **upstream** guard name rather than the old
+`hooks_discovery_span`.
 
 If turn-index paths appear, re-read bubble + composer wiring; confirm
 `Turn {n}` still shows on plain prompts and the composer next-index still
