@@ -36,9 +36,9 @@ Run from the **grok-build** repo root (the tree that contains
    - If WIP looks intentional, **stop and ask** before discarding or stashing.
 3. Preferred branch: local `main` tracking `$FORK_REMOTE/main`. If on another
    branch, tell the user and ask whether to switch to `main` or update the
-   current branch instead. After fetch (Step 1), fast-forward onto
-   `$FORK_REMOTE/main` when that is FF-safe — do not merge the xAI tip into a
-   stale local `main` that the fork already merged.
+   current branch instead. After fetch, follow the fork-tip rule in Step 1.
+   Do not merge the xAI tip into a stale local `main` that the fork already
+   merged.
 
 Record before any mutation:
 
@@ -85,22 +85,39 @@ git fetch "$UPSTREAM_REMOTE" main
 git fetch "$FORK_REMOTE" main
 ```
 
-If `HEAD` is a **strict ancestor** of `$FORK_REMOTE/main` (behind and FF-safe):
+Classify `HEAD` against `$FORK_REMOTE/main` with separate counts (a tab in
+`git rev-list --left-right --count` can vanish in Windows tool output and
+glue the two numbers into one integer):
+
+```bash
+FORK_ONLY=$(git rev-list --count HEAD.."$FORK_REMOTE/main")
+LOCAL_ONLY=$(git rev-list --count "$FORK_REMOTE/main"..HEAD)
+echo "FORK_ONLY=$FORK_ONLY  LOCAL_ONLY=$LOCAL_ONLY"
+```
+
+- **`FORK_ONLY` > 0 and `LOCAL_ONLY` = 0** — `HEAD` is a strict ancestor of
+  `$FORK_REMOTE/main`. Fast-forward:
 
 ```bash
 git merge --ff-only "$FORK_REMOTE/main"
 ```
 
-Do **not** merge `$UPSTREAM_REMOTE/main` into a stale local tip that the fork
-already merged — that creates a duplicate merge next to the fork’s existing
-one. If local `main` has commits not on `$FORK_REMOTE/main` (not FF-safe),
-**stop and ask** (merge, rebase, or leave).
+  Merging `$UPSTREAM_REMOTE/main` into that stale local tip creates a
+  duplicate merge next to the fork’s existing one. After the fast-forward,
+  merge upstream only when `HEAD` still does not contain the xAI tip.
+
+- **`FORK_ONLY` = 0** — `$FORK_REMOTE/main` is already an ancestor of `HEAD`
+  (same commit, or local `main` is strictly ahead). Leave `HEAD` where it is
+  and continue with the upstream count below. Strictly ahead is not a
+  divergence.
+
+- **`FORK_ONLY` > 0 and `LOCAL_ONLY` > 0** — the tips have diverged.
+  **Stop and ask** (merge, rebase, or leave).
 
 Show how far the **start-of-run** tip is behind the xAI tip:
 
 ```bash
 git log --oneline --left-right --cherry-pick "$RUN_START_HEAD"..."$UPSTREAM_REMOTE/main" | head -40
-git rev-list --left-right --count "$RUN_START_HEAD"..."$UPSTREAM_REMOTE/main"
 NEW_UPSTREAM=$(git rev-list --count "$RUN_START_HEAD".."$UPSTREAM_REMOTE/main")
 echo "NEW_UPSTREAM=$NEW_UPSTREAM"
 ```
@@ -108,9 +125,17 @@ echo "NEW_UPSTREAM=$NEW_UPSTREAM"
 `NEW_UPSTREAM` is the rebuild trigger (see Step 6). It counts xAI commits
 that were not reachable from `RUN_START_HEAD` — a local merge **or** a
 fast-forward onto a fork tip that already contains those commits.
+`git merge-base --is-ancestor "$UPSTREAM_REMOTE/main" "$RUN_START_HEAD"`
+exits 0 when that tip was already in the start-of-run tree (`NEW_UPSTREAM`
+is 0).
 
-A previously fetched but unmerged tip still has `NEW_UPSTREAM > 0` — do not
-treat “fetch did not move the remote-tracking ref” as “already up to date.”
+Whether `git fetch` moved `$UPSTREAM_REMOTE/main` is independent of that
+count:
+
+- The ref stays put while the fetched tip is still unmerged →
+  `NEW_UPSTREAM > 0`.
+- The ref fast-forwards onto commits already reachable from `RUN_START_HEAD`
+  (stale remote-tracking ref) → `NEW_UPSTREAM` is 0.
 
 Then:
 
@@ -932,7 +957,8 @@ Summarize for the user:
 RUN_START_HEAD=$(git rev-parse HEAD)
 git fetch "$UPSTREAM_REMOTE" main
 git fetch "$FORK_REMOTE" main
-# If HEAD is a strict ancestor of $FORK_REMOTE/main: git merge --ff-only
+# Fork tip (Step 1): ff-only only when strictly behind; continue when the fork tip is already in HEAD; stop only if diverged
+# NEW_UPSTREAM is the rev-list count, not whether fetch moved the remote-tracking ref
 git checkout main
 PRE_MERGE_HEAD=$(git rev-parse HEAD)
 NEW_UPSTREAM=$(git rev-list --count "$RUN_START_HEAD".."$UPSTREAM_REMOTE/main")
