@@ -110,7 +110,7 @@ git merge "$UPSTREAM_REMOTE/main"
 Commit message style used in this repo when wrapping merges:
 
 ```text
-Merge <upstream-remote>/main: sync monorepo into fork; preserve pager error UI, plugin-hooks-at-spawn, session turn index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, and full release-notes history
+Merge <upstream-remote>/main: sync monorepo into fork; preserve pager error UI, plugin-hooks-at-spawn, session turn index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, and the README fork summary
 ```
 
 If `git merge` reports “Already up to date” (0 commits merged), skip
@@ -356,6 +356,16 @@ intent unless analysis shows upstream absorbed them:
    `fetch_changelog()` for the markdown history. Never take a single
    side — upstream-only drops skipped-release history; HEAD-only drops
    new CDN/cache/JSON behavior or breaks welcome bullets.
+8. **README fork summary** — `README.md` has a **What this fork adds**
+   section (nav link plus a sentence in the intro) listing the fork-only
+   behavior above: copyable tool errors, session turn index, sticky Edit
+   path, subagent session IDs, plugin hooks at spawn, full release notes,
+   and the native Windows link. The Windows bullet under **Building from
+   source** points at that section instead of upstream's "best-effort"
+   wording. When upstream edits `README.md`, keep this section and take
+   the new upstream text around it. Update the section when a fork theme
+   is added or dropped. Never take a single side — upstream-only deletes
+   the fork summary; HEAD-only drops upstream README edits.
 
 **`tracker.rs` test-extract conflicts:** upstream owns unit tests in
 `acp/tracker_tests.rs` (`#[cfg(test)]` + `#[path = "tracker_tests.rs"]
@@ -472,8 +482,9 @@ sticky-header paths (`sticky_edit.rs`, `entry_renderer.rs`, `render.rs`,
 `draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`), or
 release-notes history paths (`changelog.rs` `fetch_merged` /
 `merge_with_embedded`, `xai-grok-shell/src/util/mod.rs`
-`fetch_changelog`, `release_notes.rs`), those paths show up as
-“changed” even if upstream never touched them this sync.
+`fetch_changelog`, `release_notes.rs`), or `README.md` (fork summary
+section), those paths show up as “changed” even if upstream never
+touched them this sync.
 A pre-fetch tip equals the current xAI tip whenever those commits were
 already fetched but not merged — that range is then empty.
 
@@ -534,6 +545,9 @@ git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
   crates/codegen/xai-grok-pager/src/slash/commands/release_notes.rs \
   crates/codegen/xai-grok-pager/src/app/effects/mod.rs \
   crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
+
+# Did this upstream sync touch the README (fork summary must survive)?
+git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- README.md
 ```
 
 If any pager watch paths appear, skim the upstream diff for selection ranges,
@@ -630,6 +644,12 @@ merging; `ReleaseNotesCommand` and `Effect::FetchChangelog` both call
 `ChangelogFetched` still fills `changelog_bullets` from `entries` via
 `bullets_from_entries` (not the merged markdown). Never take a single
 side of a `fetch` / `fetch_merged` conflict.
+
+**README fork summary** — if the upstream range touches `README.md`,
+re-verify **What this fork adds** is still present (nav link, intro
+sentence, and the seven bullets) and that upstream's other README edits
+were kept. The Windows build bullet must not revert to "best-effort /
+not tested" without also pointing at the fork's native link fixes.
 
 Note outcomes in the fork-analysis section of the completion report
 (“adjacent re-check: pass / adapt needed” per theme, or “n/a — paths
@@ -790,8 +810,8 @@ next `/update-grok-local` stays accurate.
 | Remotes / branches | URL-based detection no longer finds xAI vs this fork, or tracking model changed |
 | Package / binary paths | `xai-grok-pager-bin`, artifact path, or `grok-local` wiring changed |
 | Version sources | Semver crate, `build.rs` embed, or channel labeling changed |
-| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, or full release-notes history, or a new deliberate fork theme appeared |
-| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, or full release-notes history (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, `sticky_edit.rs`, `entry_renderer.rs`, `EditBlockConfig`, `subagent_takeover.rs`, `draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`, `changelog.rs` `fetch_merged`, `fetch_changelog`, `release_notes.rs`, …) |
+| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, or the README fork summary, or a new deliberate fork theme appeared |
+| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, or the README fork summary (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, `sticky_edit.rs`, `entry_renderer.rs`, `EditBlockConfig`, `subagent_takeover.rs`, `draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`, `changelog.rs` `fetch_merged`, `fetch_changelog`, `release_notes.rs`, `README.md`, …) |
 | Build / verify procedure | Toolchain, timeouts, env vars (`HERDR_AGENT`, `GROK_VERSION`), or pass criteria wrong |
 | Safety / push policy | Process friction that should become an explicit rule |
 | Operational gaps | Something non-obvious burned time this run and belongs in the skill |
@@ -824,7 +844,8 @@ Summarize for the user:
    pager-bin `build.rs`, Edit sticky-header paint/clip/config, and/or
    subagent session-id chrome (`subagent_takeover.rs`) / parent SubagentBlock,
    and/or release-notes history (`changelog.rs` `fetch_merged`,
-   `fetch_changelog`, `release_notes.rs`, welcome `changelog_bullets`)
+   `fetch_changelog`, `release_notes.rs`, welcome `changelog_bullets`),
+   and/or `README.md` (fork summary section)
    (or “n/a — paths untouched” per theme).
 4. **Code adjustments:** what was implemented after analysis (or “none”).
 5. **Build:** success / fail / **skipped — no upstream commits merged**,
