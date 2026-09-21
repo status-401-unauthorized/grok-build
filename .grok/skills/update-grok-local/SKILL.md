@@ -136,7 +136,7 @@ git merge "$UPSTREAM_REMOTE/main"
 Commit message style used in this repo when wrapping merges:
 
 ```text
-Merge <upstream-remote>/main: sync monorepo into fork; <brief note of preserved fork deltas>
+Merge <upstream-remote>/main: sync monorepo into fork; preserve pager error UI, plugin-hooks-at-spawn, session turn index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, and the README fork summary
 ```
 
 If `git merge` reports “Already up to date”, skip Steps 3–5. Rebuild only
@@ -221,6 +221,14 @@ intent unless analysis shows upstream absorbed them:
    (look for `append_specs` / “merged plugin hooks into session registry at
    spawn”). Upstream still wires plugin hooks mainly on reload; preserve the
    spawn-time merge unless upstream lands an equivalent.
+   **`spawn_step!` instrumentation conflicts:** when upstream replaces
+   `tracing::info_span!("spawn.hooks_discovery").entered()` with
+   `spawn_step!("hooks_discovery")` (or further spawn timer/span macros),
+   keep the plugin `append_specs` merge **inside** that step (`mut
+   built_hook_registry`) **and** drop the upstream guard name
+   (`hooks_discovery`). Never take a single side — upstream-only drops
+   spawn-time plugin hooks; HEAD-only (`hooks_discovery_span` / `info_span`)
+   re-conflicts on the next spawn-timer rename.
 3. **Session turn index UI** — show the 0-based `/session-info` `Turn: N`
    index on (a) plain user-prompt **scrollback bubbles** and (b) the
    **composer** input prefix (`❯ Turn N …`). Plain prompts only (not bash,
@@ -293,13 +301,108 @@ intent unless analysis shows upstream absorbed them:
    the runtime struct, `RawEditBlockConfig`, `Default`, and `From`.
    Never take a single side — upstream-only drops the pin; HEAD-only
    fails to compile when a required field is missing.
+6. **Subagent session ID UI** — as soon as a child session exists, show its
+   session ID in the **subagent output window** (fullscreen chrome, not a
+   child-scrollback block) and on the parent **SubagentBlock** when that
+   info block is expanded. Do **not** seed the child's scrollback with a
+   system/session-info line: `ensure_subagent_child_replayed` only replays
+   into an empty view, so a spawn-time block would skip transcript replay.
+   Chrome is painted in `draw_subagent_fullscreen`
+   (`app/agent_view/subagent_takeover.rs`) via `format_session_id_line`
+   (`app/subagent.rs`) on the first content row under the title. Click and
+   `c` (`copy session` hint) are handled in `intercept_takeover_input` in
+   the same file (`copy_session_id_to_clipboard`). Never take an
+   upstream-only chrome paint that drops the hit area / `c` binding.
+   Children are stamped by `insert_subagent_view` → `AgentRole::Child` /
+   `ViewSurface::ChildTakeover` (there is no `is_subagent_view` flag or
+   `mark_as_subagent_view`). The copy-session hint keys off
+   `surface == ViewSurface::ChildTakeover`. Tests that insert a child must
+   use `insert_test_child` (or `insert_subagent_view`), not a raw
+   `subagent_views.insert`. If upstream extracts takeover into a new
+   module again, port chrome / click / `c` there — do **not** keep the
+   old `draw_subagent_fullscreen` in `render.rs` (that produces a
+   misplaced-function conflict inside whatever replaced it, e.g.
+   `overlay_stop_label`). Parent block: `scrollback/blocks/subagent.rs` is foldable
+   when `child_session_id` is non-empty. The collapsed one-line header
+   includes ` · Session ID: {id}` so expanding a verb group
+   (`Ran 2 subagents`) reveals the ids on the member rows (members stay
+   collapsed; expanding a member would break the group). Individually
+   expanded body still has a dedicated `Session ID: {id}` line (copyable;
+   `copy_meta` / `copy_meta_label` = `"copy session"`). Tests:
+   `collapsed_header_includes_session_id`,
+   `expanded_output_shows_session_id`,
+   `fullscreen_subagent_shows_session_id_as_soon_as_session_exists`,
+   `subagent_window_c_copies_session_id`,
+   `subagent_window_click_copies_session_id`,
+   `subagent_copy_meta_is_child_session_id`.
+   **`SubagentBlock` / fullscreen chrome conflicts:** when upstream adds
+   fields next to `child_session_id`, or new title/chrome next to the
+   session-id row, keep **both** the fork session-id surfaces **and** every
+   new upstream field/chrome. Never take a single side — upstream-only
+   hides the child session id; HEAD-only drops new title widgets or fails
+   to compile when a required field is missing.
+7. **Full release-notes history** — `/release-notes` (alias `/changelog`)
+   shows every shipped version, newest first, so a user who skipped
+   several releases can scroll to any of them. Upstream’s CDN file is
+   the current version only (`{VERSION}.external.md`). Do not revert the
+   modal or the startup cache to `ChangelogManager::fetch()`.
+   - Entry: `xai_grok_shell::util::fetch_changelog()` in
+     `crates/codegen/xai-grok-shell/src/util/mod.rs`. It `include_str!`s
+     `crates/codegen/xai-grok-shell/CHANGELOG.md` and calls
+     `ChangelogManager::fetch_merged`.
+   - Merge: `merge_with_embedded` in
+     `crates/codegen/xai-grok-shell-base/src/util/changelog.rs`. Drop the
+     leading `# Changelog` title. Prepend CDN/cache `# ` sections whose
+     version headings are not already in the embedded file (notes that
+     landed after that file was compiled in). `##` headings are not
+     version boundaries.
+   - `GROK_CHANGELOG_OFFLINE` skips the merge and returns the seeded
+     disk cache only, so PTY tests stay deterministic.
+   - Call sites (both must use `fetch_changelog()`, not `fetch()`):
+     `slash/commands/release_notes.rs` and `Effect::FetchChangelog` in
+     `app/effects/mod.rs` (startup cache on `AppView.changelog_markdown`).
+   - Welcome bullets stay current-version JSON only:
+     `TaskResult::ChangelogFetched` → `bullets_from_entries(&entries, 3)`
+     in `app/dispatch/task_result.rs`. Never render the merged markdown
+     as welcome bullets.
+   - Slash copy: description `"View release notes for all versions"`;
+     user guide `docs/user-guide/04-slash-commands.md`.
+   Tests: `merge_uses_embedded_history_when_current_is_already_in_it`,
+   `merge_prepends_cdn_sections_missing_from_embedded`,
+   `merge_falls_back_to_embedded_when_current_missing`,
+   `merge_falls_back_to_current_when_embedded_empty`,
+   `split_h1_does_not_treat_h2_as_version_boundary`,
+   `fetch_merged_uses_embedded_on_cdn_miss`,
+   `shipped_changelog_lists_multiple_versions_newest_first`,
+   `fetch_merged_offline_keeps_seeded_cache_and_ignores_embedded`,
+   `release_notes_metadata`.
+   **`fetch` / `fetch_merged` conflicts:** when upstream changes CDN
+   fetch, cache files, JSON parse, or the `FetchChangelog` effect, keep
+   `fetch()` as current-version-only **and** keep `fetch_merged` /
+   `fetch_changelog()` for the markdown history. Never take a single
+   side — upstream-only drops skipped-release history; HEAD-only drops
+   new CDN/cache/JSON behavior or breaks welcome bullets.
+8. **README fork summary** — `README.md` has a **What this fork adds**
+   section (nav link plus a sentence in the intro) listing the fork-only
+   behavior above: copyable tool errors, session turn index, sticky Edit
+   path, subagent session IDs, plugin hooks at spawn, full release notes,
+   and the native Windows link. The Windows bullet under **Building from
+   source** points at that section instead of upstream's "best-effort"
+   wording. When upstream edits `README.md`, keep this section and take
+   the new upstream text around it. Update the section when a fork theme
+   is added or dropped. Never take a single side — upstream-only deletes
+   the fork summary; HEAD-only drops upstream README edits.
 
 **`tracker.rs` test-extract conflicts:** upstream owns unit tests in
 `acp/tracker_tests.rs` (`#[cfg(test)]` + `#[path = "tracker_tests.rs"]
 mod tests;`). If a conflict is inline `mod tests { … }` vs that path
 attribute, **take the extract** and **port** any fork-only tests into
 `tracker_tests.rs`. Do not keep the inline module — the next upstream
-sync will re-conflict a multi-thousand-line test blob.
+sync will re-conflict a multi-thousand-line test blob. When keeping or
+porting fork tests, match current helper signatures (`cargo check --lib`
+can stay green while `cargo test --lib` fails). Example: `tool_call_to_block`
+now takes `&SubagentLabelRegistry` — pass `&SubagentLabelRegistry::default()`
+at fork call sites.
 
 **Adjacent re-check (even with a clean merge / no fork-file conflicts):**
 fork intent can break without a Git conflict on the fork files themselves.
@@ -379,15 +482,35 @@ crates/codegen/xai-grok-pager/src/scrollback/render.rs
 crates/codegen/xai-grok-pager-render/src/appearance/config.rs
 ```
 
+**Subagent session ID UI** — if the upstream range touches subagent
+fullscreen chrome, SubagentBlock fold/output, or child-view spawn, re-verify
+the child session id still appears immediately in the output window and on
+the expanded parent block. Watch at least:
+
+```text
+crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover.rs
+crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover_tests.rs
+crates/codegen/xai-grok-pager/src/app/agent_view/render.rs
+crates/codegen/xai-grok-pager/src/scrollback/blocks/subagent.rs
+crates/codegen/xai-grok-pager/src/scrollback/block.rs
+crates/codegen/xai-grok-pager/src/app/subagent.rs
+crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
+```
+
 How to check (use the **commits being merged** — not
 `PRE_MERGE_HEAD..$UPSTREAM_REMOTE/main` and not a pre-fetch tip):
 
 `PRE_MERGE_HEAD..$UPSTREAM_REMOTE/main` is a tree comparison. When the fork
 already diverges in `tool/*`, `tracker.rs`, `tracker_tests.rs`, `spawn.rs`,
-turn-index UI paths, Windows proto-build / pager-bin `build.rs`, or Edit
+turn-index UI paths, Windows proto-build / pager-bin `build.rs`, Edit
 sticky-header paths (`sticky_edit.rs`, `entry_renderer.rs`, `render.rs`,
-`EditBlockConfig`), those
-paths show up as “changed” even if upstream never touched them this sync.
+`EditBlockConfig`), subagent session-id paths (`subagent_takeover.rs`,
+`draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`), or
+release-notes history paths (`changelog.rs` `fetch_merged` /
+`merge_with_embedded`, `xai-grok-shell/src/util/mod.rs`
+`fetch_changelog`, `release_notes.rs`), or `README.md` (fork summary
+section), those paths show up as “changed” even if upstream never
+touched them this sync.
 A pre-fetch tip equals the current xAI tip whenever those commits were
 already fetched but not merged — that range is then empty.
 
@@ -429,6 +552,28 @@ git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
   crates/codegen/xai-grok-pager/src/scrollback/render.rs \
   crates/codegen/xai-grok-pager/src/scrollback/blocks/tool/edit.rs \
   crates/codegen/xai-grok-pager-render/src/appearance/config.rs
+
+# Did this upstream sync touch subagent session-id chrome / parent block?
+git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
+  crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover.rs \
+  crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover_tests.rs \
+  crates/codegen/xai-grok-pager/src/app/agent_view/render.rs \
+  crates/codegen/xai-grok-pager/src/scrollback/blocks/subagent.rs \
+  crates/codegen/xai-grok-pager/src/scrollback/block.rs \
+  crates/codegen/xai-grok-pager/src/app/subagent.rs \
+  crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
+
+# Did this upstream sync touch release-notes history (embedded changelog merge)?
+git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
+  crates/codegen/xai-grok-shell-base/src/util/changelog.rs \
+  crates/codegen/xai-grok-shell/src/util/mod.rs \
+  crates/codegen/xai-grok-shell/CHANGELOG.md \
+  crates/codegen/xai-grok-pager/src/slash/commands/release_notes.rs \
+  crates/codegen/xai-grok-pager/src/app/effects/mod.rs \
+  crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
+
+# Did this upstream sync touch the README (fork summary must survive)?
+git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- README.md
 ```
 
 If any pager watch paths appear, skim the upstream diff for selection ranges,
@@ -442,7 +587,10 @@ accept an upstream-only short label that discards `old_string`.
 
 If `spawn.rs` (or related hook/plugin helpers) appear, skim the upstream
 diff and re-read the post-merge spawn hook-registry block; confirm plugin
-hooks are still appended at spawn (not only on reload).
+hooks are still appended at spawn (not only on reload), still sit inside
+the current spawn step (`spawn_step!("hooks_discovery")` or whatever
+replaced it), and drop the **upstream** guard name rather than the old
+`hooks_discovery_span`.
 
 If turn-index paths appear, re-read bubble + composer wiring; confirm
 `Turn {n}` still shows on plain prompts and the composer next-index still
@@ -469,6 +617,65 @@ Confirm post-merge: `sticky_header` is still on both config structs
 paint and selection/link mapping; the diamond bullet still appears on
 the pinned row; every `EditBlockConfig` / `RawEditBlockConfig` literal
 still has both `sticky_header` and any upstream-only fields.
+
+**Subagent session ID UI** — if the upstream range touches subagent
+fullscreen chrome, SubagentBlock fold/output, or child-view spawn, re-verify
+the child session id still appears immediately in the output window and on
+the expanded parent block. Watch at least:
+
+```text
+crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover.rs
+crates/codegen/xai-grok-pager/src/app/agent_view/subagent_takeover_tests.rs
+crates/codegen/xai-grok-pager/src/app/agent_view/render.rs
+crates/codegen/xai-grok-pager/src/scrollback/blocks/subagent.rs
+crates/codegen/xai-grok-pager/src/scrollback/block.rs
+crates/codegen/xai-grok-pager/src/app/subagent.rs
+crates/codegen/xai-grok-pager/src/app/acp_handler/session_notification.rs
+```
+
+Confirm post-merge: `draw_subagent_fullscreen` in `subagent_takeover.rs`
+still paints `format_session_id_line(child_sid)` as chrome (not a child
+scrollback block) as soon as the child session exists; `intercept_takeover_input`
+still handles click-to-copy (`hit_subagent_session_id`) and `c` via
+`copy_session_id_to_clipboard`; children are still `ViewSurface::ChildTakeover`
+via `insert_subagent_view` / `insert_test_child` (not `is_subagent_view`);
+collapsed SubagentBlock headers still include ` · Session ID: {id}` (so
+`Ran N subagents` expansion shows the ids); `SubagentBlock` is still
+foldable when `child_session_id` is set; expanded output still includes
+`Session ID: {id}`; `copy_meta` still returns the child session id.
+Never seed the child view's scrollback at spawn to show the id. If
+takeover paint/input moved again, follow the function — do not restore
+it in `render.rs`.
+
+**Full release-notes history** — if the upstream range touches changelog
+fetch/cache, `/release-notes`, or welcome changelog bullets, re-verify
+the modal still shows the embedded history (newest first) with missing
+CDN `# ` sections prepended, and welcome bullets still come from
+current-version JSON only. Watch at least:
+
+```text
+crates/codegen/xai-grok-shell-base/src/util/changelog.rs
+crates/codegen/xai-grok-shell/src/util/mod.rs
+crates/codegen/xai-grok-shell/CHANGELOG.md
+crates/codegen/xai-grok-pager/src/slash/commands/release_notes.rs
+crates/codegen/xai-grok-pager/src/app/effects/mod.rs
+crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
+```
+
+Confirm post-merge: `fetch_changelog` still `include_str!`s
+`xai-grok-shell/CHANGELOG.md` and calls `fetch_merged`; offline
+(`GROK_CHANGELOG_OFFLINE`) still returns the seeded cache without
+merging; `ReleaseNotesCommand` and `Effect::FetchChangelog` both call
+`fetch_changelog()` (not `ChangelogManager::fetch()`);
+`ChangelogFetched` still fills `changelog_bullets` from `entries` via
+`bullets_from_entries` (not the merged markdown). Never take a single
+side of a `fetch` / `fetch_merged` conflict.
+
+**README fork summary** — if the upstream range touches `README.md`,
+re-verify **What this fork adds** is still present (nav link, intro
+sentence, and the seven bullets) and that upstream's other README edits
+were kept. The Windows build bullet must not revert to "best-effort /
+not tested" without also pointing at the fork's native link fixes.
 
 Note outcomes in the fork-analysis section of the completion report
 (“adjacent re-check: pass / adapt needed” per theme, or “n/a — paths
@@ -650,8 +857,8 @@ next `/update-grok-local` stays accurate.
 | Remotes / branches | URL-based detection no longer finds xAI vs this fork, or tracking model changed |
 | Package / binary paths | `xai-grok-pager-bin`, artifact path, or `grok-local` wiring changed |
 | Version sources | Semver crate, `build.rs` embed, or channel labeling changed |
-| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, Windows proto-build / pager stack, or sticky Edit path header, or a new deliberate fork theme appeared |
-| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, Windows proto-build / pager stack, or sticky Edit path header (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, `sticky_edit.rs`, `entry_renderer.rs`, `EditBlockConfig`, …) |
+| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, or the README fork summary, or a new deliberate fork theme appeared |
+| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, or the README fork summary (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, `sticky_edit.rs`, `entry_renderer.rs`, `EditBlockConfig`, `subagent_takeover.rs`, `draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`, `changelog.rs` `fetch_merged`, `fetch_changelog`, `release_notes.rs`, `README.md`, …) |
 | Build / verify procedure | Toolchain, timeouts, env vars (`HERDR_AGENT`, `GROK_VERSION`), or pass criteria wrong |
 | Safety / push policy | Process friction that should become an explicit rule |
 | Operational gaps | Something non-obvious burned time this run and belongs in the skill |
@@ -683,7 +890,11 @@ Summarize for the user:
    include **adjacent re-check** results when upstream touched clipboard /
    selection / tool-block paths, session spawn / plugin-hook wiring,
    turn-index (bubble + composer) paths, Windows proto-build /
-   pager-bin `build.rs`, and/or Edit sticky-header paint/clip/config
+   pager-bin `build.rs`, Edit sticky-header paint/clip/config, and/or
+   subagent session-id chrome (`subagent_takeover.rs`) / parent SubagentBlock,
+   and/or release-notes history (`changelog.rs` `fetch_merged`,
+   `fetch_changelog`, `release_notes.rs`, welcome `changelog_bullets`),
+   and/or `README.md` (fork summary section)
    (or “n/a — paths untouched” per theme).
 4. **Code adjustments:** what was implemented after analysis (or “none”).
 5. **Build:** success / fail / **skipped — no new upstream commits landed**,

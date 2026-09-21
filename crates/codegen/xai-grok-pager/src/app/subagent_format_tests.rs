@@ -21,6 +21,11 @@ fn setup_enrichment_dir(
 }
 
 #[test]
+fn session_id_line_matches_session_info_label() {
+    assert_eq!(format_session_id_line("child-abc"), "Session ID: child-abc");
+}
+
+#[test]
 fn subagent_meta_line_joins_present_fields() {
     let cases = [
         (None, None, None, ""),

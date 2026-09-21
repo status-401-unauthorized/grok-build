@@ -16,6 +16,7 @@ commands, searches the web, and manages long-running tasks — interactively,
 headlessly for scripting/CI, or embedded in editors via the Agent Client
 Protocol (ACP).
 
+[What this fork adds](#what-this-fork-adds) ·
 [Installing the released binary](#installing-the-released-binary) ·
 [Building from source](#building-from-source) ·
 [Documentation](#documentation) ·
@@ -29,7 +30,8 @@ Protocol (ACP).
 **Learn more about Grok Build at [x.ai/cli](https://x.ai/cli)**
 
 This repository contains the Rust source for the `grok` CLI/TUI and its agent
-runtime. It is synced periodically from the SpaceXAI monorepo.
+runtime. It is synced periodically from the SpaceXAI monorepo and keeps the
+extra behavior in [What this fork adds](#what-this-fork-adds).
 
 A small `SOURCE_REV` file at the root records the full monorepo commit SHA
 for the version of the code present in this tree.
@@ -37,6 +39,43 @@ for the version of the code present in this tree.
 </div>
 
 ---
+
+## What this fork adds
+
+This tree follows [xai-org/grok-build](https://github.com/xai-org/grok-build)
+`main` and keeps the changes below. They are not in the official `grok`
+install.
+
+- **Copyable tool errors.** A collapsed Read, List, or Edit failure shows a
+  short reason instead of a full path. Expanding a failed Edit also shows
+  why it failed, the text it searched for, and the replacement it tried to
+  apply. That error text can be selected and copied.
+- **Session turn index.** Plain user prompts show the same 0-based turn
+  number as `/session-info`, on the scrollback bubble (`Turn N`) and as the
+  composer prefix. Bash, cron, and interjection prompts stay unlabeled.
+- **Sticky Edit path.** When an expanded Edit diff is taller than the
+  window, `Edit path/to/file` stays pinned at the top of that block while
+  you scroll. This is separate from sticky user-prompt headers. Disable it
+  with `[scrollback.blocks.edit] sticky_header = false` (default `true`).
+- **Subagent session IDs.** A child session's ID is shown in its output
+  window as soon as the session exists, and on the parent subagent row —
+  including each member of a `Ran N subagents` group. Click the ID, or
+  press `c` in the child window, to copy it.
+- **Plugin hooks at session start.** Enabled, trusted plugin hooks are
+  registered when a session starts, not only after a mid-session reload.
+- **Full release notes.** `/release-notes` (alias `/changelog`) lists every
+  shipped version, newest first, so a skipped upgrade is still in the
+  modal. Notes published after this binary was built are prepended from
+  the CDN. The welcome screen still shows only the current version's
+  bullets.
+- **Native Windows link.** Proto codegen skips the in-repo DotSlash
+  `protoc` wrapper (it is not a Windows executable) and uses `protoc` on
+  `PATH` or `$PROTOC`. Dependency output goes to a temp file, and the
+  pager is linked with an 8 MiB main-thread stack so command-line parsing
+  does not overflow.
+
+To refresh this tree from upstream without dropping the list above, use
+[`/update-grok-local`](.grok/skills/update-grok-local/SKILL.md).
 
 ## Installing the released binary
 
@@ -69,8 +108,9 @@ Requirements:
 
 - **protoc** — proto codegen resolves [`bin/protoc`](bin/protoc) via DotSlash,
   or falls back to a `protoc` on `PATH` / `$PROTOC`.
-- macOS and Linux are supported build hosts; Windows builds are best-effort
-  and not currently tested from this tree.
+- macOS and Linux are supported build hosts. This fork also links the pager
+  natively on Windows; see [What this fork adds](#what-this-fork-adds).
+  That path is not covered by upstream's release testing.
 
 ```sh
 cargo run -p xai-grok-pager-bin              # build + launch the TUI
