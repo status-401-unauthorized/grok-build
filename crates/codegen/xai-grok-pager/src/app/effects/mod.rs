@@ -2124,8 +2124,7 @@ pub(crate) fn execute(
             tasks
                 .spawn(async move {
                     let changelog = tokio::task::spawn_blocking(|| {
-                            xai_grok_shell::util::changelog::ChangelogManager::new()
-                                .fetch()
+                            xai_grok_shell::util::fetch_changelog()
                         })
                         .await
                         .unwrap_or_else(|e| {

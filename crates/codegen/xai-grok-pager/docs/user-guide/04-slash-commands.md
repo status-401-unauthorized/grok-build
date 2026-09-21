@@ -361,7 +361,7 @@ Check the current session for terminal, clipboard, color, input, notification, a
 
 ### `/release-notes`
 
-View release notes for the current version. Alias: `/changelog`.
+View release notes for all versions, newest first. Scroll to any skipped release after an upgrade. Alias: `/changelog`.
 
 ### `/docs`
 

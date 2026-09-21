@@ -1617,7 +1617,7 @@ pub enum Effect {
         /// Threaded through to `SwitchModelComplete` so `IncompatibleAgent` can roll back.
         prev_model_id: Option<acp::ModelId>,
     },
-    /// Fetch changelog from CDN (both markdown and structured JSON).
+    /// Fetch changelog JSON from the CDN (welcome bullets) and the full descending markdown history.
     /// Runs off the render path via `spawn_blocking`.
     /// Result is cached on `AppView` so `/release-notes` and the welcome screen share it.
     FetchChangelog,

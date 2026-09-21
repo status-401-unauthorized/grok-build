@@ -626,7 +626,7 @@ pub struct AppView {
     pub announcements_last_gen: u64,
     /// Selected welcome announcement for this pager launch.
     pub announcement: Option<xai_grok_announcements::RemoteAnnouncement>,
-    /// Cached changelog markdown (for `/release-notes`).
+    /// Cached changelog markdown (full descending history for `/release-notes`).
     /// Populated by `FetchChangelog` at startup; `None` until the fetch completes.
     pub changelog_markdown: Option<String>,
     /// Cached changelog bullets (for welcome screen).

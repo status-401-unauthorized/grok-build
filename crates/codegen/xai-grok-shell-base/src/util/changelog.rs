@@ -2,10 +2,13 @@
 //!
 //! Both markdown (`*.external.md`) and JSON (`*.external.json`) changelogs are published per-version to the CDN at `x.ai/cli/changelogs/`.
 //!
-//! `ChangelogManager::fetch()` retrieves both formats in parallel and returns a `Changelog` with optional markdown and structured entries.
+//! The CDN file for a given version is that version only (older published files sometimes bundled a few neighbors). `/release-notes` should show the full descending history so a user who skipped several releases can scroll to any of them.
+//!
+//! `ChangelogManager::fetch()` retrieves the current version's markdown and JSON in parallel.
+//! [`ChangelogManager::fetch_merged`] then replaces the markdown with the crate's embedded `CHANGELOG.md` (all versions, newest first), prepending any CDN sections whose version headings are not already in that history.
 //! Consumers pick the format they need:
 //! - `/release-notes` uses `changelog.markdown` for rich scrollback display
-//! - The welcome screen uses `changelog.entries` for bullet rendering
+//! - The welcome screen uses `changelog.entries` for bullet rendering of the current version
 
 use std::path::PathBuf;
 
@@ -38,8 +41,8 @@ pub struct Changelog {
 }
 
 /// Manages changelog retrieval from CDN with local disk caching.
-/// Single entry point: `fetch()` returns both markdown and JSON in one `Changelog` struct.
-/// Each format is fetched independently with its own cache file, so a failure in one doesn't block the other.
+/// `fetch()` returns the current version only. `fetch_merged()` is what `/release-notes` uses: current-version JSON plus the full descending markdown history.
+/// Each CDN format is fetched independently with its own cache file, so a failure in one doesn't block the other.
 pub struct ChangelogManager {
     md_cache: PathBuf,
     json_cache: PathBuf,
@@ -74,9 +77,28 @@ impl ChangelogManager {
     /// Fetch both markdown and JSON changelogs for the current version. Each format is fetched independently (CDN, 3 s timeout) and cached to disk, falling back to the cached copy on failure.
     /// Either field may be `None` if offline with no cache. When `GROK_CHANGELOG_OFFLINE` is set (PTY / integration tests), the CDN is skipped and only the disk cache is read.
     /// JSON is cached only after a successful parse; the markdown cache is write-through since it's consumed as raw text.
+    /// This returns the current version only. Interactive `/release-notes` should call [`Self::fetch_merged`] so skipped releases are included.
     pub fn fetch(&self) -> Changelog {
         // Always re-resolve from env so a caller holding an older manager (or a stale OnceLock) still reads the live harness home
         Self::from_env_home().fetch_with(changelog_offline(), CHANGELOG_BASE)
+    }
+
+    /// Like [`fetch`], then replaces markdown with the full descending history in `embedded`.
+    ///
+    /// `embedded` is the crate's `CHANGELOG.md` (all shipped versions). The CDN publishes one file per version, so a user who skipped several releases would otherwise only see the latest.
+    /// When the CDN file contains version headings not already in `embedded` (a build whose notes landed after the file was compiled in), those sections are prepended.
+    /// When `GROK_CHANGELOG_OFFLINE` is set, the embedded history is skipped so PTY tests that seed a small cache stay deterministic.
+    pub fn fetch_merged(&self, embedded: &str) -> Changelog {
+        Self::from_env_home().fetch_merged_with(changelog_offline(), CHANGELOG_BASE, embedded)
+    }
+
+    /// Test seam for [`fetch_merged`]: explicit offline flag and CDN base, using this manager's cache paths.
+    fn fetch_merged_with(&self, offline: bool, base: &str, embedded: &str) -> Changelog {
+        let mut changelog = self.fetch_with(offline, base);
+        if !offline {
+            changelog.markdown = merge_with_embedded(changelog.markdown, embedded);
+        }
+        changelog
     }
 
     /// Fetch using this manager's already-resolved cache paths, an explicit offline flag, and an explicit CDN base. Split out of [`fetch`] so unit tests can drive it against a temp home without touching process-global env.
@@ -191,6 +213,87 @@ pub fn bullets_from_entries(entries: &[ChangelogEntry], max: usize) -> Vec<Strin
         .take(max)
         .map(|e| strip_markdown_inline(&e.description))
         .collect()
+}
+
+/// Combine current-version CDN/cache markdown with the full embedded history.
+///
+/// The result is newest-first: any CDN sections whose `# ` version headings are not already in `embedded` are prepended, then the embedded history (minus a leading `# Changelog` title).
+fn merge_with_embedded(current: Option<String>, embedded: &str) -> Option<String> {
+    let embedded = strip_changelog_title(embedded.trim());
+    if embedded.is_empty() {
+        return nonempty_markdown(current);
+    }
+    let Some(current) = nonempty_markdown(current) else {
+        return Some(embedded.to_string());
+    };
+
+    let extra: Vec<&str> = split_h1_sections(&current)
+        .into_iter()
+        .filter(|section| {
+            heading_of(section).is_none_or(|heading| !embedded.lines().any(|line| line == heading))
+        })
+        .collect();
+    if extra.is_empty() {
+        Some(embedded.to_string())
+    } else {
+        Some(format!("{}\n\n{embedded}", extra.join("\n\n")))
+    }
+}
+
+fn nonempty_markdown(md: Option<String>) -> Option<String> {
+    md.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Drop the document title so the first heading the user sees is a version.
+fn strip_changelog_title(md: &str) -> &str {
+    match md.strip_prefix("# Changelog") {
+        Some(rest) => rest.trim_start_matches(['\r', '\n']).trim_start(),
+        None => md,
+    }
+}
+
+fn is_h1(line: &str) -> bool {
+    let line = line.trim_end_matches(['\n', '\r']);
+    line.starts_with("# ") && !line.starts_with("## ")
+}
+
+fn heading_of(section: &str) -> Option<&str> {
+    section.lines().next().filter(|line| is_h1(line))
+}
+
+/// Split markdown into H1 sections (version blocks). A leading preamble before the first H1 is dropped.
+fn split_h1_sections(md: &str) -> Vec<&str> {
+    let mut starts: Vec<usize> = Vec::new();
+    let mut byte = 0usize;
+    for line in md.split_inclusive('\n') {
+        if is_h1(line) {
+            starts.push(byte);
+        }
+        byte = byte.saturating_add(line.len());
+    }
+    if starts.is_empty() {
+        let trimmed = md.trim();
+        return if trimmed.is_empty() {
+            Vec::new()
+        } else {
+            vec![trimmed]
+        };
+    }
+
+    let mut sections = Vec::with_capacity(starts.len());
+    for pair in starts.windows(2) {
+        let Some(&start) = pair.first() else { continue };
+        let Some(&end) = pair.get(1) else { continue };
+        if let Some(section) = md.get(start..end).map(str::trim).filter(|s| !s.is_empty()) {
+            sections.push(section);
+        }
+    }
+    if let Some(&start) = starts.last()
+        && let Some(section) = md.get(start..).map(str::trim).filter(|s| !s.is_empty())
+    {
+        sections.push(section);
+    }
+    sections
 }
 
 /// Blocking HTTP fetch.
@@ -322,5 +425,161 @@ mod tests {
         assert_eq!(first.description, "");
         assert_eq!(second.category, "");
         assert_eq!(second.description, "ok");
+    }
+
+    const EMBEDDED_TWO_VERSIONS: &str = "\
+# Changelog
+
+# 1.0.2 — 2026-01-02
+
+## Features
+
+- **Two** landed.
+
+# 1.0.1 — 2026-01-01
+
+## Bug Fixes
+
+- **One** landed.
+";
+
+    #[test]
+    fn merge_uses_embedded_history_when_current_is_already_in_it() {
+        let current = Some("# 1.0.2 — 2026-01-02\n\n## Features\n\n- **Two** landed.\n".into());
+        let merged = merge_with_embedded(current, EMBEDDED_TWO_VERSIONS).unwrap();
+        assert!(
+            merged.starts_with("# 1.0.2 — 2026-01-02"),
+            "first heading must be the newest version, got: {merged}"
+        );
+        assert!(
+            !merged.contains("# Changelog"),
+            "document title is redundant with the modal chrome"
+        );
+        assert!(merged.contains("# 1.0.1 — 2026-01-01"));
+        assert_eq!(
+            merged.matches("# 1.0.2 — 2026-01-02").count(),
+            1,
+            "current version must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn merge_prepends_cdn_sections_missing_from_embedded() {
+        let current = Some(
+            "\
+# 1.0.3 — 2026-01-03
+
+## Features
+
+- **Three** landed.
+
+# 1.0.2 — 2026-01-02
+
+## Features
+
+- **Two** landed.
+"
+            .into(),
+        );
+        let merged = merge_with_embedded(current, EMBEDDED_TWO_VERSIONS).unwrap();
+        let headings: Vec<&str> = merged.lines().filter(|line| is_h1(line)).collect();
+        assert_eq!(
+            headings.as_slice(),
+            [
+                "# 1.0.3 — 2026-01-03",
+                "# 1.0.2 — 2026-01-02",
+                "# 1.0.1 — 2026-01-01",
+            ]
+        );
+        assert_eq!(merged.matches("# 1.0.2 — 2026-01-02").count(), 1);
+    }
+
+    #[test]
+    fn merge_falls_back_to_embedded_when_current_missing() {
+        let merged = merge_with_embedded(None, EMBEDDED_TWO_VERSIONS).unwrap();
+        assert!(merged.contains("# 1.0.2 — 2026-01-02"));
+        assert!(merged.contains("# 1.0.1 — 2026-01-01"));
+    }
+
+    #[test]
+    fn merge_falls_back_to_current_when_embedded_empty() {
+        let current = Some("# 1.0.9 — 2026-01-09\n\n- only cdn\n".into());
+        assert_eq!(
+            merge_with_embedded(current, "   ").as_deref(),
+            Some("# 1.0.9 — 2026-01-09\n\n- only cdn")
+        );
+    }
+
+    #[test]
+    fn split_h1_does_not_treat_h2_as_version_boundary() {
+        let sections = split_h1_sections(
+            "# 1.0.1 — 2026-01-01\n\n## Features\n\n- a\n\n## Bug Fixes\n\n- b\n",
+        );
+        let [section] = sections.as_slice() else {
+            panic!("expected one version section, got {}", sections.len());
+        };
+        assert!(section.contains("## Features"));
+        assert!(section.contains("## Bug Fixes"));
+    }
+
+    #[test]
+    fn fetch_merged_uses_embedded_on_cdn_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("grok-home-merged");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let changelog = manager_for(&home).fetch_merged_with(
+            false,
+            "http://127.0.0.1:1",
+            EMBEDDED_TWO_VERSIONS,
+        );
+        let md = changelog.markdown.expect("embedded history on CDN miss");
+        assert!(md.contains("# 1.0.2 — 2026-01-02"));
+        assert!(md.contains("# 1.0.1 — 2026-01-01"));
+    }
+
+    #[test]
+    fn shipped_changelog_lists_multiple_versions_newest_first() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../xai-grok-shell/CHANGELOG.md");
+        let md = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let headings: Vec<&str> = md
+            .lines()
+            .filter(|line| {
+                line.starts_with("# ") && !line.starts_with("## ") && *line != "# Changelog"
+            })
+            .collect();
+        assert!(
+            headings.len() >= 2,
+            "CHANGELOG.md must list more than the current version so /release-notes can show skipped releases"
+        );
+        let Some(first) = headings.first() else {
+            panic!("no version headings");
+        };
+        let Some(second) = headings.get(1) else {
+            panic!("need two version headings");
+        };
+        assert!(
+            first.contains(" — "),
+            "newest heading should be `# x.y.z — date`, got {first}"
+        );
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn fetch_merged_offline_keeps_seeded_cache_and_ignores_embedded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("grok-home-offline-merged");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("CHANGELOG.md"), "# seeded offline md\n").unwrap();
+
+        let changelog =
+            manager_for(&home).fetch_merged_with(true, CHANGELOG_BASE, EMBEDDED_TWO_VERSIONS);
+        assert_eq!(
+            changelog.markdown.as_deref(),
+            Some("# seeded offline md\n"),
+            "offline PTY tests must keep seeing the seeded cache, not the full history"
+        );
     }
 }

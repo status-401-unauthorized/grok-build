@@ -10,6 +10,14 @@ pub(crate) mod user_identity;
 // Re-exported at the original paths so existing `crate::util::…` and `xai_grok_shell::util::…` users compile unchanged
 pub use xai_grok_shell_base::util::*;
 
+/// Fetch the current version's structured entries (welcome bullets) plus markdown for `/release-notes`.
+///
+/// Markdown is the full descending history from this crate's `CHANGELOG.md`, not only the CDN file for `VERSION`. A user who skipped several releases can scroll to any of them. The CDN current-version file is still fetched so notes that landed after this file was compiled in are prepended.
+pub fn fetch_changelog() -> changelog::Changelog {
+    const EMBEDDED: &str = include_str!("../../CHANGELOG.md");
+    changelog::ChangelogManager::new().fetch_merged(EMBEDDED)
+}
+
 /// Parse an env var as a JSON object. Returns `None` if unset or not a valid JSON object.
 pub(crate) fn parse_json_object_env(var: &str) -> Option<serde_json::Value> {
     let val = std::env::var(var).ok()?;
