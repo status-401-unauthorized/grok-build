@@ -446,9 +446,14 @@ intent unless analysis shows upstream absorbed them:
    on every exhaustive match (`resolve_action`, the dashboard non-dashboard
    fallthrough, the child gate and `ALLOWED` list, the dispatch router,
    `action_for_string`, `action_for_reset`, rollback, the persist helper,
-   `current_value_for`, and the settings e2e membership lists). Never take
-   a single side — upstream-only drops the chord; HEAD-only fails to
-   compile when a new upstream variant is missing.
+   `current_value_for`, and the settings e2e membership lists). The same
+   rule applies to the settings **setter import list** in
+   `app/dispatch/router.rs` (`use super::settings::setters::{…}`): keep
+   `set_copy_markdown_shortcut` **and** every new upstream setter in that
+   list (example: `set_subagent_model_inheritance`). A conflict there is
+   not a match arm. Never take a single side — upstream-only drops the
+   chord (or fails to compile `SetCopyMarkdownShortcut`); HEAD-only fails
+   to compile when a new upstream setter or variant is missing.
 9. **README fork summary** — `README.md` has a **What this fork adds**
    section (nav link plus a sentence in the intro) listing the fork-only
    behavior above: copyable tool errors, session turn index, sticky Edit
@@ -786,8 +791,10 @@ is still yank; the block viewer still lets the chord through; startup and
 mode switch still call `apply_copy_markdown_shortcut`; the settings key
 `copy_markdown_shortcut` still round-trips (empty / `Ctrl+Shift+y` restores
 both chords, `off` unbinds, a chord the editor or another action owns is
-rejected); the child gate still allows `CopyMarkdownSource`. Never take a
-single side of an `ActionId` or settings-match conflict.
+rejected); the child gate still allows `CopyMarkdownSource`; the
+`router.rs` setter import still names `set_copy_markdown_shortcut` and
+every new upstream setter. Never take a single side of an `ActionId`,
+settings-match, or setter-import conflict.
 
 **README fork summary** — if the upstream range touches `README.md`,
 re-verify **What this fork adds** is still present (nav link, intro
