@@ -4242,6 +4242,7 @@ fn dashboard_action_for_id(
         | ActionId::FocusScrollback
         | ActionId::CopyBlockContent
         | ActionId::CopyBlockMeta
+        | ActionId::CopyMarkdownSource
         | ActionId::OpenBlockViewer
         | ActionId::OpenNextLink
         | ActionId::OpenPrevLink

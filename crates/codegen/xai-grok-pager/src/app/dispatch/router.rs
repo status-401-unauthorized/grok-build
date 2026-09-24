@@ -82,14 +82,14 @@ use super::settings::setters::{
     set_contextual_hint_export_copy, set_contextual_hint_image_input,
     set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
     set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
-    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
-    set_follow_up_behavior, set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode,
-    set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
-    set_page_flip_on_send, set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
-    set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
-    set_voice_stt_language,
+    set_copy_markdown_shortcut, set_default_model, set_default_selected_permission,
+    set_display_refresh_auto_cadence, set_follow_up_behavior, set_fork_secondary_model,
+    set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
+    set_max_thoughts_width, set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions,
+    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
+    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips,
+    set_simple_mode, set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
+    set_voice_keybind_enabled, set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -106,8 +106,8 @@ use super::status::{
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
     dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta,
-    dispatch_dump_input_log, dispatch_export_conversation, dispatch_open_block_viewer,
-    dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
+    dispatch_copy_markdown_source, dispatch_dump_input_log, dispatch_export_conversation,
+    dispatch_open_block_viewer, dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
     dispatch_open_transcript_pager,
 };
 use super::turn::{
@@ -699,6 +699,10 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_copy_assistant_message(app, n, file_path);
             vec![]
         }
+        Action::CopyMarkdownSource => {
+            dispatch_copy_markdown_source(app);
+            vec![]
+        }
         Action::ExportConversation { file_path } => {
             dispatch_export_conversation(app, file_path);
             vec![]
@@ -1133,6 +1137,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetVoiceKeybindEnabled(v) => set_voice_keybind_enabled(app, v),
         Action::SetVoiceCaptureMode(s) => set_voice_capture_mode(app, s),
         Action::SetVoiceSttLanguage(s) => set_voice_stt_language(app, s),
+        Action::SetCopyMarkdownShortcut(s) => set_copy_markdown_shortcut(app, s),
         Action::ToggleTimestamps => dispatch_toggle_timestamps(app),
         Action::SetYoloMode(v) => set_yolo_mode(app, v),
         Action::SetPermissionMode(kind) => set_permission_mode(app, kind),

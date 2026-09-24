@@ -326,6 +326,9 @@ pub enum Action {
         n: usize,
         file_path: Option<std::path::PathBuf>,
     },
+    /// Copy the markdown source of the selected assistant message, or the latest one.
+    /// Bound to Ctrl+Shift+Y / F6 by default; the chord is `[ui].copy_markdown_shortcut`.
+    CopyMarkdownSource,
     /// Export the active (sub)agent's conversation transcript as Markdown.
     /// `None` copies to the clipboard (with route-aware toast and stats); `Some(p)` writes a UTF-8 file.
     /// All ~ expansion, parent dir creation, and fs::write live in the dispatch handler.
@@ -501,6 +504,9 @@ pub enum Action {
     /// Set the voice STT language (catalog code or `auto`). SHELL-owned; persisted to `[ui].voice_stt_language`.
     /// Takes effect for the next voice capture.
     SetVoiceSttLanguage(String),
+    /// Set the chord that copies an assistant message's markdown source.
+    /// Empty or the default label restores Ctrl+Shift+Y and F6. `off` unbinds. SHELL-owned; persisted to `[ui].copy_markdown_shortcut`.
+    SetCopyMarkdownShortcut(String),
     /// Toggle timestamp display on messages.
     ToggleTimestamps,
     /// Toggle compact mode (reduce user message padding).

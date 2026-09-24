@@ -15,6 +15,11 @@
 //! The bubbling is explicit in code, not hidden in `context_matches`.
 
 mod defaults;
+mod shortcut;
+
+pub use shortcut::{
+    COPY_MARKDOWN_SHORTCUT_DEFAULT, CopyMarkdownBinding, resolve_copy_markdown_spec,
+};
 
 use crossterm::event::KeyEvent;
 
@@ -84,6 +89,9 @@ pub enum ActionId {
     // Block content
     CopyBlockContent,
     CopyBlockMeta,
+    /// Copy the markdown source of the selected assistant message, or the latest one.
+    /// The chord is [`ActionId`]'s binding, overridable from Settings / `[ui].copy_markdown_shortcut`.
+    CopyMarkdownSource,
     OpenBlockViewer,
 
     // Link navigation

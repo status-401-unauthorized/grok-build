@@ -556,6 +556,12 @@ pub fn current_value_for(
         "voice_keybind_enabled" => {
             Some(SettingValue::Bool(ui.voice_keybind_enabled.unwrap_or(true)))
         }
+        // Unset shows the compiled default chord. `off` and custom chords are stored as written.
+        "copy_markdown_shortcut" => Some(SettingValue::String(
+            ui.copy_markdown_shortcut
+                .clone()
+                .unwrap_or_else(|| crate::actions::COPY_MARKDOWN_SHORTCUT_DEFAULT.to_string()),
+        )),
         // SHELL: canonicalized from `[ui].voice_capture_mode`; None falls back to "hold"
         "voice_capture_mode" => Some(SettingValue::Enum(canonical_voice_capture_mode(
             ui.voice_capture_mode.as_deref(),
@@ -1003,6 +1009,18 @@ mod tests {
                         *default,
                         ui.voice_keybind_enabled.unwrap_or(true),
                         "voice_keybind_enabled default drifts from UiConfig::default()",
+                    );
+                }
+                // copy_markdown_shortcut: Option<String>; None reads as the compiled chord label
+                ("copy_markdown_shortcut", SettingKind::String { default, .. }) => {
+                    assert!(
+                        ui.copy_markdown_shortcut.is_none(),
+                        "test assumes UiConfig::default().copy_markdown_shortcut is None",
+                    );
+                    assert_eq!(
+                        *default,
+                        crate::actions::COPY_MARKDOWN_SHORTCUT_DEFAULT,
+                        "copy_markdown_shortcut default drifts from the compiled chord",
                     );
                 }
                 // voice_capture_mode: Option<String>; None reads as "hold"

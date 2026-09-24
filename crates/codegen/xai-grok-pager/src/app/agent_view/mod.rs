@@ -1942,6 +1942,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::ToggleMouseCapture => Action::ToggleMouseCapture,
         ActionId::CopyBlockContent => Action::CopyBlockContent,
         ActionId::CopyBlockMeta => Action::CopyBlockMeta,
+        ActionId::CopyMarkdownSource => Action::CopyMarkdownSource,
         ActionId::OpenBlockViewer => Action::OpenBlockViewer,
         ActionId::OpenNextLink => Action::OpenNextLink,
         ActionId::OpenPrevLink => Action::OpenPrevLink,

@@ -1044,6 +1044,7 @@ pub(super) fn action_for_string(
                     .map(Action::SetForkSecondaryModel)
             }
         }
+        "copy_markdown_shortcut" => Some(Action::SetCopyMarkdownShortcut(value)),
 
         _ => {
             let _ = value;

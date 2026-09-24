@@ -99,6 +99,11 @@ pub struct UiConfig {
     /// When `false` the chord is ignored; `/voice` still starts dictation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_keybind_enabled: Option<bool>,
+    /// Chord that copies an assistant message's markdown source.
+    /// Unset keeps Ctrl+Shift+Y and F6. `off` unbinds. Any other value is a shortcut such as `alt+y` or `f6`.
+    /// Written by the settings modal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_markdown_shortcut: Option<String>,
     /// When `true`, registers `Ctrl+R` (while scrollback is focused) to toggle terminal mouse reporting (mouse capture). That
     /// hands selection back to the terminal for native click-drag copy/paste. Opt-in only; unset/false leaves mouse reporting
     /// always on with no toggle shortcut. The prompt keeps `Ctrl+R` for history search; focus scrollback (Esc/Tab) first.
@@ -275,6 +280,7 @@ impl Default for UiConfig {
             voice_capture_mode: None,
             voice_stt_language: None,
             voice_keybind_enabled: None,
+            copy_markdown_shortcut: None,
             mouse_reporting_toggle: None,
             remember_tool_approvals: None,
             cancel_subagents_on_turn_cancel: None,

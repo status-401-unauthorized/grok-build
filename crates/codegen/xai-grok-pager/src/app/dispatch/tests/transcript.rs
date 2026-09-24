@@ -580,3 +580,76 @@ fn open_block_viewer_skips_image_viewer_when_no_graphics() {
         "image_viewer modal should not open on terminals without a graphics protocol"
     );
 }
+
+fn last_system_text(agent: &crate::app::agent_view::AgentView) -> String {
+    for i in (0..agent.scrollback.len()).rev() {
+        if let Some(entry) = agent.scrollback.entry(i)
+            && let RenderBlock::System(block) = &entry.block
+        {
+            return block.text.clone();
+        }
+    }
+    String::new()
+}
+
+#[test]
+fn copy_markdown_source_prefers_the_selected_message_over_the_latest() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("**older**"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("**newer** and `code`"));
+        agent.scrollback.set_selected(Some(0));
+        assert_eq!(
+            super::super::transcript::pick_assistant_markdown(agent),
+            super::super::transcript::AssistantMarkdownPick::Ready("**older**".to_string())
+        );
+    }
+    dispatch(Action::CopyMarkdownSource, &mut app);
+    let agent = app.agents.get(&id).unwrap();
+    let notice = last_system_text(agent);
+    assert!(
+        notice.contains("markdown source"),
+        "notice should name the markdown source, got {notice:?}"
+    );
+    assert!(
+        !notice.contains("**older**"),
+        "the transcript notice must not echo the copied source"
+    );
+}
+
+#[test]
+fn copy_markdown_source_uses_the_latest_when_selection_is_not_an_assistant_message() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("question"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("# Title\n\n**bold**"));
+        agent.scrollback.set_selected(Some(0));
+        assert_eq!(
+            super::super::transcript::pick_assistant_markdown(agent),
+            super::super::transcript::AssistantMarkdownPick::Ready(
+                "# Title\n\n**bold**".to_string()
+            )
+        );
+    }
+}
+
+#[test]
+fn copy_markdown_source_reports_when_there_is_no_assistant_message() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dispatch(Action::CopyMarkdownSource, &mut app);
+    let agent = app.agents.get(&id).unwrap();
+    assert_eq!(last_system_text(agent), "No assistant messages to copy");
+}

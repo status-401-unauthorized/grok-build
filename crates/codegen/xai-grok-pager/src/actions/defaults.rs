@@ -378,6 +378,23 @@ pub(super) fn default_actions(
                 "Copies only the block's identifier: a tool call's command line or a file block's path, not the body.\nHandy to re-run a command or paste a path elsewhere.\nUse lowercase y to copy the full content instead.",
             ),
         },
+        // Agent-screen, not scrollback: after a reply the prompt still has focus, and Ctrl+Y there is editor yank.
+        // F6 is the alt for terminals that collapse Ctrl+Shift+letter into Ctrl+letter. Settings can replace both.
+        ActionDef {
+            id: ActionId::CopyMarkdownSource,
+            label: "copy md",
+            description: "Copy markdown source",
+            default_key: key!('y', CONTROL | SHIFT),
+            alt_keys: vec![key!(F(6))],
+            category: Category::ConversationAction,
+            context: When::AgentScreen,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Copies an assistant message as markdown source: headings, bold, code fences, and links as written, not the rendered plain text.\nIf an assistant message is selected, or open in the viewer, that message is copied. Otherwise the latest assistant message is copied.\nDefault keys are Ctrl+Shift+Y and F6. Change them in Settings (Copy markdown shortcut) or with [ui].copy_markdown_shortcut. Set the value to off to unbind.\nLowercase y copies the rendered text of the selected block instead.",
+            ),
+        },
         ActionDef {
             id: ActionId::OpenBlockViewer,
             label: "view",

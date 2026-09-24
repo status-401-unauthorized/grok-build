@@ -413,6 +413,14 @@ pub async fn set_voice_keybind_enabled(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.voice_keybind_enabled = Some(value)).await
 }
 
+/// Persist `[ui].copy_markdown_shortcut`. An empty value clears the key so the compiled default chords return.
+pub async fn set_copy_markdown_shortcut(value: String) -> Result<()> {
+    update_config(|cfg| {
+        cfg.ui.copy_markdown_shortcut = if value.is_empty() { None } else { Some(value) };
+    })
+    .await
+}
+
 /// Persist `[ui].default_selected_permission` via `update_config`.
 /// Value is one of the canonical strings from `DEFAULT_SELECTED_PERMISSION_CHOICES` (`default` | `allow_once` | `allow_always` | `reject`).
 /// `default` is the "no preselection" sentinel.

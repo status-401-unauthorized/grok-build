@@ -684,6 +684,10 @@ impl AgentView {
                     if registry.lookup(key, When::Always).is_some() {
                         return InputOutcome::Unchanged;
                     }
+                    // The viewer swallows keys that are not global. This chord copies the open message's source.
+                    if registry.matches_id(ActionId::CopyMarkdownSource, key) {
+                        return InputOutcome::Action(Action::CopyMarkdownSource);
+                    }
                     self.handle_block_viewer_key(key)
                 }
                 Event::Mouse(mouse) => self.handle_block_viewer_mouse(mouse),

@@ -63,6 +63,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "voice_keybind_enabled",
     "voice_capture_mode",
     "voice_stt_language",
+    "copy_markdown_shortcut",
     // Contextual-hints group and its per-tip child toggles (exercised via the group sub-sheet, not as top-level rows)
     "contextual_hints",
     "contextual_hints.undo",
@@ -1885,10 +1886,10 @@ fn registry_kind_membership_through_pr_14() {
     );
 
     let string_keys = by_kind.remove("String").unwrap_or_default();
-    assert!(
-        string_keys.is_empty(),
-        "no String-kind settings should remain — `default_model` + `fork_secondary_model` \
-         migrated to DynamicEnum; got: {string_keys:?}",
+    assert_eq!(
+        string_keys,
+        vec!["copy_markdown_shortcut"],
+        "String kind membership drift",
     );
 
     let dynamic_enum_keys = by_kind.remove("DynamicEnum").unwrap_or_default();
@@ -2018,6 +2019,9 @@ fn defaults_round_trip_through_registry() {
             "voice_keybind_enabled" => SettingValue::Bool(true),
             "voice_capture_mode" => SettingValue::Enum("hold"),
             "voice_stt_language" => SettingValue::Enum("en"),
+            "copy_markdown_shortcut" => {
+                SettingValue::String(xai_grok_pager::actions::COPY_MARKDOWN_SHORTCUT_DEFAULT.into())
+            }
             "plan_mode" => SettingValue::Enum("off"),
             "show_tips" => SettingValue::Bool(true),
             "auto_update" => SettingValue::Bool(true),
@@ -7400,5 +7404,81 @@ fn collapsed_edit_blocks_renders_under_appearance_category_shell_owned() {
         collapsed_idx,
         "collapsed_edit_blocks must be immediately below group_tool_verbs; \
          Appearance order: {keys:?}"
+    );
+}
+
+/// Enter on Copy markdown shortcut opens the string editor seeded with the default chord.
+#[test]
+fn copy_markdown_shortcut_enter_opens_editor_and_commits_custom_chord() {
+    let mut s = make_state();
+    navigate_to(&mut s, "copy_markdown_shortcut");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "Enter must open the editor, got {outcome:?}"
+    );
+    assert!(
+        matches!(s.mode(), SettingsModalMode::EditingValue { key, .. } if key == "copy_markdown_shortcut"),
+        "expected the string editor, got {:?}",
+        s.mode()
+    );
+    assert_eq!(
+        s.editing_buffer(),
+        Some(xai_grok_pager::actions::COPY_MARKDOWN_SHORTCUT_DEFAULT)
+    );
+    for _ in 0..32 {
+        let _ = handle_settings_key(&mut s, &press(KeyCode::Backspace));
+    }
+    assert_eq!(s.editing_buffer(), Some(""));
+    for ch in ['f', '6'] {
+        let _ = handle_settings_key(&mut s, &press(KeyCode::Char(ch)));
+    }
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    match outcome {
+        SettingsKeyOutcome::Action(Action::SetCopyMarkdownShortcut(value)) => {
+            assert_eq!(value, "f6");
+        }
+        other => panic!("expected SetCopyMarkdownShortcut, got {other:?}"),
+    }
+}
+
+/// A click on the row selects it; a second click opens the editor.
+#[test]
+fn copy_markdown_shortcut_second_click_opens_editor() {
+    let mut s = make_state();
+    s.list_area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 80,
+    };
+    s.row_rects.resize(s.rows.len(), Rect::default());
+    let row_idx = row_idx_for(&s, "copy_markdown_shortcut");
+    s.row_rects[row_idx] = Rect {
+        x: 0,
+        y: row_idx as u16,
+        width: 80,
+        height: 1,
+    };
+    let _ = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        20,
+        row_idx as u16,
+    );
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        20,
+        row_idx as u16,
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "second click must open the editor, got {outcome:?}"
+    );
+    assert!(
+        matches!(s.mode(), SettingsModalMode::EditingValue { key, .. } if key == "copy_markdown_shortcut"),
+        "second click must enter EditingValue, got {:?}",
+        s.mode()
     );
 }

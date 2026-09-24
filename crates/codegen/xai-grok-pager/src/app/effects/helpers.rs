@@ -1325,6 +1325,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "copy_markdown_shortcut" => {
+            let SettingValue::String(s) = value else {
+                return Err(kind_mismatch("copy_markdown_shortcut", "String", &value));
+            };
+            xai_grok_shell::util::config::set_copy_markdown_shortcut(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
         "max_thoughts_width" => {
             let SettingValue::Int(i) = value else {
                 return Err(kind_mismatch("max_thoughts_width", "Int", &value));

@@ -5,6 +5,7 @@
 
 use super::registry::{
     DynamicEnumSource, EnumChoice, SettingCategory, SettingKind, SettingMeta, SettingOwner,
+    StringValidator,
 };
 use crate::appearance::ScrollMode;
 use crate::appearance::TextSelection;
@@ -1362,6 +1363,35 @@ pub fn default_settings() -> Vec<SettingMeta> {
             ],
             kind: SettingKind::Bool {
                 default: ui_default.voice_keybind_enabled.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned, persisted to `[ui].copy_markdown_shortcut`.
+        // Unset keeps the compiled chords (Ctrl+Shift+Y and F6). `off` unbinds.
+        SettingMeta {
+            key: "copy_markdown_shortcut",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Shell,
+            label: "Copy markdown shortcut",
+            description: "Chord that copies an assistant message's markdown source, \
+                          not the rendered text. Examples: Ctrl+Shift+y, F6, Alt+y. \
+                          off unbinds it. Empty restores the default.",
+            keywords: &[
+                "copy",
+                "markdown",
+                "source",
+                "shortcut",
+                "keybinding",
+                "hotkey",
+                "yank",
+                "clipboard",
+                "ctrl+shift+y",
+                "f6",
+            ],
+            kind: SettingKind::String {
+                default: crate::actions::COPY_MARKDOWN_SHORTCUT_DEFAULT,
+                validator: StringValidator::Any,
             },
             restart_required: false,
             hidden_in_minimal: false,

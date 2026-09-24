@@ -34,6 +34,15 @@ pub(crate) fn reseed_screen_mode(app: &mut AppView, mode: ScreenMode) {
         mode,
         super::mouse_reporting_toggle_enabled(),
     );
+    if let Err(err) = app
+        .registry
+        .apply_copy_markdown_shortcut(app.current_ui.copy_markdown_shortcut.as_deref())
+    {
+        tracing::warn!(
+            error = %err,
+            "mode switch kept the default copy-markdown shortcut"
+        );
+    }
     app.welcome_prompt.set_screen_mode(mode);
     // Minimal turns mouse capture off; without a motion event the last hover would stick.
     app.last_mouse_pos = None;

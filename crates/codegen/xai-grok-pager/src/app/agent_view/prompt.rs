@@ -1954,8 +1954,9 @@ mod apple_terminal_ctrl_o_upgrade_cta_tests {
 #[cfg(test)]
 mod queue_recall_tests {
     use super::*;
+    use crate::actions::ActionRegistry;
     use crate::app::agent_view::test_fixtures::make_running_agent;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn up(agent: &mut AgentView) -> InputOutcome {
         agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
@@ -1977,6 +1978,50 @@ mod queue_recall_tests {
     }
 
     #[test]
+    fn ctrl_shift_y_from_the_prompt_copies_markdown_source() {
+        let mut agent = test_fixtures::make_agent();
+        agent.active_pane = AgentPane::Prompt;
+        let outcome = agent.handle_prompt_key_for_test(&KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CopyMarkdownSource)),
+            "Ctrl+Shift+Y must copy markdown source, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_y_from_scrollback_copies_markdown_source() {
+        let mut agent = test_fixtures::make_agent();
+        agent.active_pane = AgentPane::Scrollback;
+        let registry = ActionRegistry::defaults();
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+            &registry,
+        );
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::CopyMarkdownSource)),
+            "Ctrl+Shift+Y from the scrollback must copy markdown source, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn ctrl_y_from_the_prompt_is_still_yank() {
+        let mut agent = test_fixtures::make_agent();
+        agent.active_pane = AgentPane::Prompt;
+        agent.prompt.set_text("hello");
+        let outcome = agent
+            .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert!(
+            !matches!(outcome, InputOutcome::Action(Action::CopyMarkdownSource)),
+            "Ctrl+Y must stay the editor yank, got {outcome:?}"
+        );
+    }
+
     fn up_leaves_the_composer_and_history_untouched() {
         let mut agent = make_running_agent();
         agent.active_pane = AgentPane::Prompt;

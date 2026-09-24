@@ -215,6 +215,64 @@ pub(in crate::app::dispatch) fn set_voice_keybind_enabled(
     }]
 }
 
+/// Mirror `[ui].copy_markdown_shortcut` into the live action registry.
+/// `None` restores Ctrl+Shift+Y and F6. Called by rollback; the commit path applies first so a conflict can abort before this runs.
+pub(super) fn set_copy_markdown_shortcut_inner(app: &mut AppView, stored: Option<String>) {
+    app.current_ui.copy_markdown_shortcut = stored.clone();
+    if let Err(err) = app.registry.apply_copy_markdown_shortcut(stored.as_deref()) {
+        tracing::warn!(
+            target: "settings",
+            error = %err,
+            "copy markdown shortcut was not applied"
+        );
+    }
+}
+
+/// Set the chord that copies an assistant message's markdown source.
+/// SHELL-owned; persists to `[ui].copy_markdown_shortcut` via `Effect::PersistSetting`.
+/// An empty value or the default label clears the override. `off` unbinds. Invalid chords toast and do not persist.
+pub(in crate::app::dispatch) fn set_copy_markdown_shortcut(
+    app: &mut AppView,
+    raw: String,
+) -> Vec<Effect> {
+    let spec = raw.trim();
+    let binding = match crate::actions::resolve_copy_markdown_spec(Some(spec)) {
+        Ok(binding) => binding,
+        Err(err) => {
+            app.show_toast(&format!("Copy markdown shortcut: {err}"));
+            refresh_open_settings_modals(app);
+            return vec![];
+        }
+    };
+    let stored = match binding {
+        crate::actions::CopyMarkdownBinding::Default => None,
+        crate::actions::CopyMarkdownBinding::Off => Some("off".to_string()),
+        crate::actions::CopyMarkdownBinding::Custom(key) => Some(key.display_pretty()),
+    };
+    let prev = app.current_ui.copy_markdown_shortcut.clone();
+    if prev == stored {
+        return vec![];
+    }
+    // `apply` rejects a chord another action owns and leaves the registry unchanged.
+    if let Err(err) = app.registry.apply_copy_markdown_shortcut(stored.as_deref()) {
+        app.show_toast(&format!("Copy markdown shortcut: {err}"));
+        refresh_open_settings_modals(app);
+        return vec![];
+    }
+    app.current_ui.copy_markdown_shortcut = stored.clone();
+    refresh_open_settings_modals(app);
+    let shown = stored
+        .as_deref()
+        .unwrap_or(crate::actions::COPY_MARKDOWN_SHORTCUT_DEFAULT);
+    tracing::info!(target: "settings", key = "copy_markdown_shortcut", value = shown, "setting changed");
+    app.show_toast(&format!("\u{2713} Copy markdown shortcut: {shown}"));
+    vec![Effect::PersistSetting {
+        key: "copy_markdown_shortcut",
+        value: crate::settings::SettingValue::String(stored.clone().unwrap_or_default()),
+        rollback_value: crate::settings::SettingValue::String(prev.unwrap_or_default()),
+    }]
+}
+
 /// Mirror the STT language preference into `app.current_ui` and `app.voice_config.language`.
 /// The value may be the client-only `"auto"` sentinel; the voice crate resolves it at connect time.
 /// Called by the commit path AND by [`apply_setting_rollback`].

@@ -3,11 +3,69 @@
 use super::ctx::with_active_agent;
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
+use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::{BlockContent, RenderBlock};
 use crate::scrollback::blocks::ToolCallBlock;
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
+
+/// Which assistant markdown the copy-source chord should put on the clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AssistantMarkdownPick {
+    /// Non-empty source.
+    Ready(String),
+    /// An assistant message was chosen, but its source is empty.
+    Empty,
+    /// The transcript has no assistant message.
+    Missing,
+}
+
+/// Prefer the viewer entry, then the selected row, then the latest assistant message.
+/// Selection and the viewer win even when that message is empty, so a blank row is not silently replaced.
+pub(super) fn pick_assistant_markdown(agent: &AgentView) -> AssistantMarkdownPick {
+    if let Some(viewer) = agent.block_viewer.as_ref()
+        && let Some(entry) = agent.scrollback.get_by_id(viewer.entry_id)
+        && let Some(pick) = markdown_pick_from_block(&entry.block)
+    {
+        return pick;
+    }
+    if let Some(idx) = agent.scrollback.selected()
+        && !agent.scrollback.entry_content_hidden_by_group(idx)
+        && let Some(entry) = agent.scrollback.entry(idx)
+        && let Some(pick) = markdown_pick_from_block(&entry.block)
+    {
+        return pick;
+    }
+    let mut saw_empty = false;
+    for i in (0..agent.scrollback.len()).rev() {
+        let Some(entry) = agent.scrollback.entry(i) else {
+            continue;
+        };
+        match markdown_pick_from_block(&entry.block) {
+            Some(AssistantMarkdownPick::Ready(text)) => return AssistantMarkdownPick::Ready(text),
+            Some(AssistantMarkdownPick::Empty) => saw_empty = true,
+            _ => {}
+        }
+    }
+    if saw_empty {
+        AssistantMarkdownPick::Empty
+    } else {
+        AssistantMarkdownPick::Missing
+    }
+}
+
+fn markdown_pick_from_block(block: &RenderBlock) -> Option<AssistantMarkdownPick> {
+    let RenderBlock::AgentMessage(msg) = block else {
+        return None;
+    };
+    let text = msg.copy_text(true);
+    Some(if text.is_empty() {
+        AssistantMarkdownPick::Empty
+    } else {
+        AssistantMarkdownPick::Ready(text)
+    })
+}
 
 /// Copy the selected block's content to the system clipboard.
 ///
@@ -99,9 +157,8 @@ pub(super) fn dispatch_copy_assistant_message(
             return;
         }
 
-        let stats = crate::clipboard::clipboard_stats_suffix(text);
-
         if let Some(p) = file_path {
+            let stats = crate::clipboard::clipboard_stats_suffix(text);
             match crate::clipboard::write_text_to_copy_file(text, &p) {
                 Ok(path) => {
                     agent.scrollback.push_block(RenderBlock::system(format!(
@@ -118,32 +175,67 @@ pub(super) fn dispatch_copy_assistant_message(
             return;
         }
 
-        let delivery = crate::clipboard::copy_text_or_file(text);
-        match &delivery {
-            crate::clipboard::CopyDelivery::Clipboard { file, .. } => {
-                let block_msg = match file {
-                    Some(path) => format!(
-                        "Copied to clipboard (also saved to {}){stats}",
-                        crate::clipboard::display_copy_path(path)
-                    ),
-                    None => format!("Copied to clipboard{stats}"),
-                };
-                agent.scrollback.push_block(RenderBlock::system(block_msg));
-            }
-            crate::clipboard::CopyDelivery::File { path } => {
-                agent.scrollback.push_block(RenderBlock::system(format!(
-                    "Clipboard unreachable: wrote {}{stats}",
-                    crate::clipboard::display_copy_path(path)
-                )));
-            }
-            crate::clipboard::CopyDelivery::Failed { .. } => {
+        deliver_clipboard_text(
+            agent,
+            text,
+            "Copied to clipboard",
+            "Clipboard unreachable: wrote",
+        );
+    });
+}
+
+/// Copy markdown source for the open or selected assistant message, else the latest one.
+pub(super) fn dispatch_copy_markdown_source(app: &mut AppView) {
+    app.export_copy_slash_used = true;
+    with_active_agent(app, |agent| {
+        agent.note_export_copy_slash_used();
+        match pick_assistant_markdown(agent) {
+            AssistantMarkdownPick::Missing => {
                 agent
                     .scrollback
-                    .push_block(RenderBlock::system(format!("Copy failed{stats}")));
+                    .push_block(RenderBlock::system("No assistant messages to copy"));
+            }
+            AssistantMarkdownPick::Empty => {
+                agent
+                    .scrollback
+                    .push_block(RenderBlock::system("Assistant message is empty"));
+            }
+            AssistantMarkdownPick::Ready(text) => {
+                deliver_clipboard_text(
+                    agent,
+                    &text,
+                    "Copied markdown source to clipboard",
+                    "Clipboard unreachable: markdown source written to",
+                );
             }
         }
-        agent.show_toast_ticks(delivery.toast_message().as_ref(), delivery.toast_ticks());
     });
+}
+
+fn deliver_clipboard_text(
+    agent: &mut AgentView,
+    text: &str,
+    success_prefix: &str,
+    unreachable_prefix: &str,
+) {
+    let stats = crate::clipboard::clipboard_stats_suffix(text);
+    let delivery = crate::clipboard::copy_text_or_file(text);
+    let block_msg = match &delivery {
+        crate::clipboard::CopyDelivery::Clipboard { file, .. } => match file {
+            Some(path) => format!(
+                "{success_prefix} (also saved to {}){stats}",
+                crate::clipboard::display_copy_path(path)
+            ),
+            None => format!("{success_prefix}{stats}"),
+        },
+        crate::clipboard::CopyDelivery::File { path } => format!(
+            "{unreachable_prefix} {}{stats}",
+            crate::clipboard::display_copy_path(path)
+        ),
+        crate::clipboard::CopyDelivery::Failed { .. } => format!("Copy failed{stats}"),
+    };
+    agent.scrollback.push_block(RenderBlock::system(block_msg));
+    agent.show_toast_ticks(delivery.toast_message().as_ref(), delivery.toast_ticks());
 }
 
 /// Dispatch for the `/export` command.

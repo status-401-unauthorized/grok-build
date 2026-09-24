@@ -1,6 +1,6 @@
 # Keyboard Shortcuts
 
-Reference for key bindings in the Grok Build TUI. Bindings are built in and cannot currently be remapped.
+Reference for key bindings in the Grok Build TUI. Bindings are built in. The copy-markdown shortcut can be changed in Settings or with `[ui].copy_markdown_shortcut` (see below); the rest cannot currently be remapped.
 
 ---
 
@@ -78,10 +78,21 @@ prompt. `⇧E` clears all pins, and `Ctrl+E` clears pins on thinking blocks.
 
 | Key | Action |
 |-----|--------|
-| `y` | Copy block content to clipboard |
+| `y` | Copy block content to clipboard (rendered plain text for markdown) |
 | `⇧Y` | Copy block metadata (e.g., the shell command) to clipboard |
 | `Enter` | Open block content in fullscreen viewer |
 | `Ctrl+F` | Open block content in fullscreen viewer (alt binding) |
+
+`Ctrl+Shift+Y` (alt: `F6`) copies the **markdown source** of an assistant message: headings, `**bold**`, code fences, and links as written, not the rendered plain text `y` copies. It works while the prompt or the scrollback is focused. If an assistant message is selected, or open in the viewer, that message is copied; otherwise the latest assistant message is copied. `/copy` does the same for the latest message.
+
+Change the chord in Settings → Editor & Input → **Copy markdown shortcut**, or in `config.toml`:
+
+```toml
+[ui]
+copy_markdown_shortcut = "alt+y"   # or "f6", "ctrl+shift+y", "off"
+```
+
+`off` unbinds it. An empty value, or `Ctrl+Shift+y`, restores the default (Ctrl+Shift+Y and F6). The value is rejected if another action or the prompt editor already uses that chord.
 
 ---
 

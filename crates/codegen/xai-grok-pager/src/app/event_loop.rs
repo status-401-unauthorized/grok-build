@@ -1567,6 +1567,15 @@ pub(crate) async fn run(
         term_state.screen_mode,
         mouse_toggle.value,
     );
+    if let Err(err) = app
+        .registry
+        .apply_copy_markdown_shortcut(app.current_ui.copy_markdown_shortcut.as_deref())
+    {
+        tracing::warn!(
+            error = %err,
+            "[ui].copy_markdown_shortcut ignored; keeping Ctrl+Shift+Y and F6"
+        );
+    }
     crate::app::MOUSE_REPORTING_TOGGLE_ENABLED
         .store(mouse_toggle.value, std::sync::atomic::Ordering::Release);
     let action_registered = app
