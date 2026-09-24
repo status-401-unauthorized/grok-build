@@ -161,7 +161,7 @@ git merge "$UPSTREAM_REMOTE/main"
 Commit message style used in this repo when wrapping merges:
 
 ```text
-Merge <upstream-remote>/main: sync monorepo into fork; preserve pager error UI, plugin-hooks-at-spawn, session turn index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, and the README fork summary
+Merge <upstream-remote>/main: sync monorepo into fork; preserve pager error UI, plugin-hooks-at-spawn, session turn index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, copy markdown source, and the README fork summary
 ```
 
 If `git merge` reports “Already up to date”, skip Steps 3–5. Rebuild only
@@ -407,16 +407,59 @@ intent unless analysis shows upstream absorbed them:
    `fetch_changelog()` for the markdown history. Never take a single
    side — upstream-only drops skipped-release history; HEAD-only drops
    new CDN/cache/JSON behavior or breaks welcome bullets.
-8. **README fork summary** — `README.md` has a **What this fork adds**
+8. **Copy markdown source** — `Ctrl+Shift+Y` (alt `F6`) copies an assistant
+   message's markdown source (headings, bold, code fences, links), not the
+   rendered plain text that scrollback `y` copies. The selected assistant
+   message wins, then the message open in the block viewer, otherwise the
+   latest assistant message. The chord is `When::AgentScreen`, so it works
+   while the prompt or the scrollback is focused. Do not bind `Ctrl+Y`:
+   that is prompt-editor yank.
+   - Action: `ActionId::CopyMarkdownSource` / `Action::CopyMarkdownSource`.
+     Default keys live in `actions/defaults.rs`. Parse and rebind live in
+     `actions/shortcut.rs` (`COPY_MARKDOWN_SHORTCUT_DEFAULT`,
+     `apply_copy_markdown_shortcut`).
+   - Pick and clipboard: `pick_assistant_markdown` /
+     `dispatch_copy_markdown_source` in `app/dispatch/transcript.rs`
+     (`AgentMessageBlock::copy_text(true)`).
+   - Routing: prompt AgentScreen lookup in `app/agent_view/prompt.rs`
+     (before the editor); the block viewer in `app/agent_view/input.rs`
+     must let the chord through. Re-apply the configured chord after every
+     registry rebuild (`app/event_loop.rs`, `app/mode_switch.rs`).
+   - Setting: `[ui].copy_markdown_shortcut` on `UiConfig`
+     (`xai-grok-shared/src/ui_config.rs`). Settings key
+     `copy_markdown_shortcut` (`settings/defs.rs`). Empty or `Ctrl+Shift+y`
+     restores both default chords; `off` unbinds. Persist via
+     `set_copy_markdown_shortcut` (`xai-grok-shell` `settings_writes.rs`).
+     Child takeover must allow the action (`child_action_filter.rs` and its
+     allowlist).
+   - Docs: `docs/user-guide/03-keyboard-shortcuts.md`,
+     `26-config-reference.md`. `/copy` still copies the latest message's
+     source and mentions the chord.
+   - Tests: `actions::shortcut::tests`,
+     `ctrl_shift_y_from_the_prompt_copies_markdown_source`,
+     `ctrl_shift_y_from_scrollback_copies_markdown_source`,
+     `copy_markdown_source_prefers_the_selected_message_over_the_latest`,
+     `copy_markdown_source_uses_the_latest_when_selection_is_not_an_assistant_message`,
+     settings e2e `copy_markdown_shortcut_*`.
+   **`ActionId` / settings-match conflicts:** when upstream adds an action
+   or setting arm, keep `CopyMarkdownSource` and `SetCopyMarkdownShortcut`
+   on every exhaustive match (`resolve_action`, the dashboard non-dashboard
+   fallthrough, the child gate and `ALLOWED` list, the dispatch router,
+   `action_for_string`, `action_for_reset`, rollback, the persist helper,
+   `current_value_for`, and the settings e2e membership lists). Never take
+   a single side — upstream-only drops the chord; HEAD-only fails to
+   compile when a new upstream variant is missing.
+9. **README fork summary** — `README.md` has a **What this fork adds**
    section (nav link plus a sentence in the intro) listing the fork-only
    behavior above: copyable tool errors, session turn index, sticky Edit
    path, subagent session IDs, plugin hooks at spawn, full release notes,
-   and the native Windows link. The Windows bullet under **Building from
-   source** points at that section instead of upstream's "best-effort"
-   wording. When upstream edits `README.md`, keep this section and take
-   the new upstream text around it. Update the section when a fork theme
-   is added or dropped. Never take a single side — upstream-only deletes
-   the fork summary; HEAD-only drops upstream README edits.
+   copy markdown source, and the native Windows link. The Windows bullet
+   under **Building from source** points at that section instead of
+   upstream's "best-effort" wording. When upstream edits `README.md`, keep
+   this section and take the new upstream text around it. Update the
+   section when a fork theme is added or dropped. Never take a single
+   side — upstream-only deletes the fork summary; HEAD-only drops upstream
+   README edits.
 
 **`tracker.rs` test-extract conflicts:** upstream owns unit tests in
 `acp/tracker_tests.rs` (`#[cfg(test)]` + `#[path = "tracker_tests.rs"]
@@ -533,7 +576,9 @@ sticky-header paths (`sticky_edit.rs`, `entry_renderer.rs`, `render.rs`,
 `draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`), or
 release-notes history paths (`changelog.rs` `fetch_merged` /
 `merge_with_embedded`, `xai-grok-shell/src/util/mod.rs`
-`fetch_changelog`, `release_notes.rs`), or `README.md` (fork summary
+`fetch_changelog`, `release_notes.rs`), copy-markdown paths
+(`actions/shortcut.rs`, `CopyMarkdownSource`,
+`[ui].copy_markdown_shortcut`), or `README.md` (fork summary
 section), those paths show up as “changed” even if upstream never
 touched them this sync.
 A pre-fetch tip equals the current xAI tip whenever those commits were
@@ -596,6 +641,26 @@ git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
   crates/codegen/xai-grok-pager/src/slash/commands/release_notes.rs \
   crates/codegen/xai-grok-pager/src/app/effects/mod.rs \
   crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
+
+# Did this upstream sync touch copy-markdown source (chord, pick, or setting)?
+git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
+  crates/codegen/xai-grok-pager/src/actions/shortcut.rs \
+  crates/codegen/xai-grok-pager/src/actions/defaults.rs \
+  crates/codegen/xai-grok-pager/src/actions/mod.rs \
+  crates/codegen/xai-grok-pager/src/app/actions.rs \
+  crates/codegen/xai-grok-pager/src/app/dispatch/transcript.rs \
+  crates/codegen/xai-grok-pager/src/app/dispatch/router.rs \
+  crates/codegen/xai-grok-pager/src/app/agent_view/input.rs \
+  crates/codegen/xai-grok-pager/src/app/agent_view/prompt.rs \
+  crates/codegen/xai-grok-pager/src/app/agent_view/child_action_filter.rs \
+  crates/codegen/xai-grok-pager/src/app/dispatch/settings/ \
+  crates/codegen/xai-grok-pager/src/settings/ \
+  crates/codegen/xai-grok-pager/src/app/event_loop.rs \
+  crates/codegen/xai-grok-pager/src/app/mode_switch.rs \
+  crates/codegen/xai-grok-shared/src/ui_config.rs \
+  crates/codegen/xai-grok-shell/src/util/config/settings_writes.rs \
+  crates/codegen/xai-grok-pager/docs/user-guide/03-keyboard-shortcuts.md \
+  crates/codegen/xai-grok-pager/docs/user-guide/26-config-reference.md
 
 # Did this upstream sync touch the README (fork summary must survive)?
 git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- README.md
@@ -696,9 +761,37 @@ merging; `ReleaseNotesCommand` and `Effect::FetchChangelog` both call
 `bullets_from_entries` (not the merged markdown). Never take a single
 side of a `fetch` / `fetch_merged` conflict.
 
+**Copy markdown source** — if the upstream range touches assistant-message
+copy, the action registry, prompt key routing, the block viewer, settings
+dispatch, or `UiConfig`, re-verify `Ctrl+Shift+Y` / `F6` still copy
+markdown source and that `[ui].copy_markdown_shortcut` still rebinds them.
+Watch at least:
+
+```text
+crates/codegen/xai-grok-pager/src/actions/shortcut.rs
+crates/codegen/xai-grok-pager/src/actions/defaults.rs
+crates/codegen/xai-grok-pager/src/app/dispatch/transcript.rs
+crates/codegen/xai-grok-pager/src/app/agent_view/prompt.rs
+crates/codegen/xai-grok-pager/src/app/agent_view/input.rs
+crates/codegen/xai-grok-shared/src/ui_config.rs
+crates/codegen/xai-grok-shell/src/util/config/settings_writes.rs
+```
+
+Confirm post-merge: `ActionId::CopyMarkdownSource` is still
+`When::AgentScreen` with default `Ctrl+Shift+Y` and alt `F6`;
+`pick_assistant_markdown` still prefers the selected assistant message,
+then the viewer entry, then the latest, and still uses `copy_text(true)`;
+the prompt path still resolves the chord before the editor, and `Ctrl+Y`
+is still yank; the block viewer still lets the chord through; startup and
+mode switch still call `apply_copy_markdown_shortcut`; the settings key
+`copy_markdown_shortcut` still round-trips (empty / `Ctrl+Shift+y` restores
+both chords, `off` unbinds, a chord the editor or another action owns is
+rejected); the child gate still allows `CopyMarkdownSource`. Never take a
+single side of an `ActionId` or settings-match conflict.
+
 **README fork summary** — if the upstream range touches `README.md`,
 re-verify **What this fork adds** is still present (nav link, intro
-sentence, and the seven bullets) and that upstream's other README edits
+sentence, and the eight bullets) and that upstream's other README edits
 were kept. The Windows build bullet must not revert to "best-effort /
 not tested" without also pointing at the fork's native link fixes.
 
@@ -882,8 +975,8 @@ next `/update-grok-local` stays accurate.
 | Remotes / branches | URL-based detection no longer finds xAI vs this fork, or tracking model changed |
 | Package / binary paths | `xai-grok-pager-bin`, artifact path, or `grok-local` wiring changed |
 | Version sources | Semver crate, `build.rs` embed, or channel labeling changed |
-| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, or the README fork summary, or a new deliberate fork theme appeared |
-| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, or the README fork summary (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, `sticky_edit.rs`, `entry_renderer.rs`, `EditBlockConfig`, `subagent_takeover.rs`, `draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`, `changelog.rs` `fetch_merged`, `fetch_changelog`, `release_notes.rs`, `README.md`, …) |
+| Fork themes | Upstream absorbed error-UI, plugin-hooks-at-spawn, session turn-index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, copy markdown source, or the README fork summary, or a new deliberate fork theme appeared |
+| Adjacent watch paths | New surfaces matter for copy/selection/tool-error, plugin-hook spawn, turn-index UI, Windows proto-build / pager stack, sticky Edit path header, subagent session ID UI, full release-notes history, copy markdown source, or the README fork summary (clipboard, scrollback, ACP, `spawn.rs`, composer, `xai-proto-build`, pager-bin `build.rs`, `sticky_edit.rs`, `entry_renderer.rs`, `EditBlockConfig`, `subagent_takeover.rs`, `draw_subagent_fullscreen`, `scrollback/blocks/subagent.rs`, `changelog.rs` `fetch_merged`, `fetch_changelog`, `release_notes.rs`, `actions/shortcut.rs`, `CopyMarkdownSource`, `[ui].copy_markdown_shortcut`, `README.md`, …) |
 | Build / verify procedure | Toolchain, timeouts, env vars (`HERDR_AGENT`, `GROK_VERSION`), or pass criteria wrong |
 | Safety / push policy | Process friction that should become an explicit rule |
 | Operational gaps | Something non-obvious burned time this run and belongs in the skill |
@@ -919,6 +1012,8 @@ Summarize for the user:
    subagent session-id chrome (`subagent_takeover.rs`) / parent SubagentBlock,
    and/or release-notes history (`changelog.rs` `fetch_merged`,
    `fetch_changelog`, `release_notes.rs`, welcome `changelog_bullets`),
+   and/or copy markdown source (`actions/shortcut.rs`,
+   `CopyMarkdownSource`, `[ui].copy_markdown_shortcut`),
    and/or `README.md` (fork summary section)
    (or “n/a — paths untouched” per theme).
 4. **Code adjustments:** what was implemented after analysis (or “none”).

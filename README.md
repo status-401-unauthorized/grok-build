@@ -68,6 +68,11 @@ install.
   modal. Notes published after this binary was built are prepended from
   the CDN. The welcome screen still shows only the current version's
   bullets.
+- **Copy markdown source.** `Ctrl+Shift+Y` (or `F6`) copies an assistant
+  reply as markdown — headings, bold, and code fences — not the rendered
+  text. It copies the selected assistant message, or the latest one.
+  Change the chord in Settings, or with `[ui].copy_markdown_shortcut`
+  (`off` unbinds it).
 - **Native Windows link.** Proto codegen skips the in-repo DotSlash
   `protoc` wrapper (it is not a Windows executable) and uses `protoc` on
   `PATH` or `$PROTOC`. Dependency output goes to a temp file, and the
