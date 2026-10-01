@@ -239,21 +239,29 @@ intent unless analysis shows upstream absorbed them:
    `expanded_failure_header_is_path_only_body_has_full_error`. Primary
    paths: `scrollback/blocks/tool/*`, `scrollback/block.rs`,
    `acp/tracker.rs`, `acp/tracker_tests.rs`.
-2. **Plugin hooks at spawn** — merge enabled+trusted plugin hooks into the
-   session `HookRegistry` at session start (not only on mid-session
-   ReloadHooks / ReloadPlugins). Primary path:
-   `crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs`
-   (look for `append_specs` / “merged plugin hooks into session registry at
-   spawn”). Upstream still wires plugin hooks mainly on reload; preserve the
-   spawn-time merge unless upstream lands an equivalent.
-   **`spawn_step!` instrumentation conflicts:** when upstream replaces
-   `tracing::info_span!("spawn.hooks_discovery").entered()` with
-   `spawn_step!("hooks_discovery")` (or further spawn timer/span macros),
-   keep the plugin `append_specs` merge **inside** that step (`mut
-   built_hook_registry`) **and** drop the upstream guard name
-   (`hooks_discovery`). Never take a single side — upstream-only drops
-   spawn-time plugin hooks; HEAD-only (`hooks_discovery_span` / `info_span`)
-   re-conflicts on the next spawn-timer rename.
+2. **Plugin hooks at spawn** — enabled+trusted plugin hooks must be in the
+   session `HookRegistry` before the session actor starts. Upstream does
+   this with `with_plugin_hooks` inside the current spawn step
+   (`spawn_step!("hooks_discovery")`, or whatever renamed it) in
+   `crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs`.
+   Specs are parsed when the plugin registry is built
+   (`LoadedPlugin.hook_specs` via `load_plugin_hook_specs` in
+   `xai-grok-agent` `plugins/hooks_adapter.rs`); `active_plugins()` is
+   enabled and trusted. Top-level sessions pass
+   `PluginHookSource::Registry`. Subagents pass
+   `PluginHookSource::Parent` so they keep the parent plugin layer.
+   `reload_hooks_impl` uses the same helper. The discovery block binds
+   `(built_hook_registry, hook_disabled)` and the session stores
+   `hook_disabled`. `discover_hooks` takes `&ProcessHookInputs` from
+   `session_hook_inputs()` plus `Trust::from_verdict`.
+   `parse_plugin_hooks` / `parse_plugin_hooks_from_value` are private.
+   **Spawn-step / discovery conflicts:** keep `with_plugin_hooks` inside
+   the current step, keep the `hook_disabled` binding, and keep
+   `PluginHookSource::Parent` for subagents. Do not restore a manual
+   `append_specs` loop. Never take a single side — dropping
+   `with_plugin_hooks` loads plugin hooks only on reload; keeping the old
+   loop or the old `discover_hooks(git_root, compat, bool)` call does not
+   compile and leaves `hook_disabled` unbound.
 3. **Session turn index UI** — show the 0-based `/session-info` `Turn: N`
    index on (a) plain user-prompt **scrollback bubbles** and (b) the
    **composer** input prefix (`❯ Turn N …`). Plain prompts only (not bash,
@@ -493,19 +501,21 @@ crates/codegen/xai-grok-pager/src/acp/tracker_tests.rs
 ```
 
 **Plugin hooks at spawn** — if the upstream range touches session spawn,
-hook reload, or plugin registry snapshot application, re-verify the
-spawn-time plugin `append_specs` path still exists after merge. Watch at
-least:
+hook reload, or plugin registry snapshot application, re-verify theme 2:
+`with_plugin_hooks` still runs inside the current spawn step before the
+session actor starts, subagents still pass `PluginHookSource::Parent`,
+and `hook_disabled` is still bound. Do not restore `parse_plugin_hooks`
+or a manual `append_specs` loop. Watch at least:
 
 ```text
 crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs
+crates/codegen/xai-grok-agent/src/plugins/hooks_adapter.rs
 ```
 
 Also skim related reload/snapshot helpers when they appear in the upstream
 diff (e.g. `reload_hooks_impl`, `apply_plugin_registry_snapshot`, or other
-`acp_session_impl/*` hook/plugin wiring). Confirm post-merge working tree
-still merges plugin file + inline hooks into `built_hook_registry` before
-the session actor starts.
+`acp_session_impl/*` hook/plugin wiring). `reload_hooks_impl` should keep
+calling `with_plugin_hooks`.
 
 **Session turn index UI** — if the upstream range touches user-prompt
 render, prompt_index stamping, queue drain paint, composer prefix layout,
@@ -604,7 +614,8 @@ git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
 # Did this upstream sync touch session spawn / plugin-hook wiring?
 git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
   crates/codegen/xai-grok-shell/src/session/acp_session_impl/spawn.rs \
-  crates/codegen/xai-grok-shell/src/session/acp_session_impl/
+  crates/codegen/xai-grok-shell/src/session/acp_session_impl/ \
+  crates/codegen/xai-grok-agent/src/plugins/hooks_adapter.rs
 
 # Did this upstream sync touch turn-index UI (bubble + composer)?
 git diff --name-only "${UPSTREAM_BASE}".."$UPSTREAM_TIP" -- \
@@ -681,11 +692,13 @@ and that `edit.rs` still paints the collapsed reason suffix. Do not
 accept an upstream-only short label that discards `old_string`.
 
 If `spawn.rs` (or related hook/plugin helpers) appear, skim the upstream
-diff and re-read the post-merge spawn hook-registry block; confirm plugin
-hooks are still appended at spawn (not only on reload), still sit inside
-the current spawn step (`spawn_step!("hooks_discovery")` or whatever
-replaced it), and drop the **upstream** guard name rather than the old
-`hooks_discovery_span`.
+diff and re-read the post-merge spawn hook-registry block. Confirm
+`with_plugin_hooks` still runs inside the current spawn step
+(`spawn_step!("hooks_discovery")` or whatever replaced it), subagents
+still pass `PluginHookSource::Parent`, and `(built_hook_registry,
+hook_disabled)` is still bound for the session struct. Do not restore
+`parse_plugin_hooks` or a manual `append_specs` loop. On a spawn-step
+rename, move the `with_plugin_hooks` call into the new step.
 
 If turn-index paths appear, re-read bubble + composer wiring; confirm
 `Turn {n}` still shows on plain prompts and the composer next-index still
