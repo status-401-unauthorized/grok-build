@@ -109,10 +109,60 @@ git merge --ff-only "$FORK_REMOTE/main"
 - **`FORK_ONLY` = 0** — `$FORK_REMOTE/main` is already an ancestor of `HEAD`
   (same commit, or local `main` is strictly ahead). Leave `HEAD` where it is
   and continue with the upstream count below. Strictly ahead is not a
-  divergence.
+  divergence. This repo is updated from more than one machine: if
+  `LOCAL_ONLY` > 0, those commits exist only here until they are pushed.
+  Say so in the completion report (item 7). Do not push unless the user
+  asks.
 
 - **`FORK_ONLY` > 0 and `LOCAL_ONLY` > 0** — the tips have diverged.
-  **Stop and ask** (merge, rebase, or leave).
+  A forgotten push is the usual cause: each machine merged the same xAI
+  tip on its own. Classify that before asking. Do **not** continue to
+  Step 2, and do not merge either tip, while they still diverge.
+
+  ```bash
+  MB=$(git merge-base HEAD "$FORK_REMOTE/main")
+  echo "=== fork only ==="
+  git log --oneline "$MB".."$FORK_REMOTE/main"
+  echo "=== local only ==="
+  git log --oneline "$MB"..HEAD
+  ```
+
+  **Duplicate sync** — a local-only commit and a fork-only commit are
+  both merges, and their two parents are the same pair (parent order
+  does not matter; the subject may say `origin/main` on one machine and
+  `upstream/main` on the other). Diff those two merge trees, then diff
+  the tips:
+
+  ```bash
+  git rev-parse <local-merge>^1 <local-merge>^2
+  git rev-parse <fork-merge>^1 <fork-merge>^2
+  git diff --stat <local-merge> <fork-merge>
+  git diff --stat HEAD "$FORK_REMOTE/main"
+  ```
+
+  - The merge-tree diff is empty, or only comments and blank lines, and
+    any extra commits on the published tip are docs (this skill,
+    README): the other machine already published that sync. Recommend
+    `git reset --hard "$FORK_REMOTE/main"` and **wait for agreement**.
+    Do not merge again. A third merge of the same parents is the
+    failure this rule exists to avoid. After an agreed reset, this is
+    not new upstream work: keep `NEW_UPSTREAM` as counted from
+    `RUN_START_HEAD`, skip the rebuild, and in Step 7 say that the
+    binary stamp still names the discarded commit. Leave the binary
+    unless the user asks to rebuild.
+  - The merge-tree diff changes code: show the files and **stop and
+    ask** (take the fork tip, merge, or leave). Do not reset or merge
+    until the user chooses.
+  - Not a duplicate sync (each side has its own unpushed work): show
+    both commit lists and **stop and ask** (merge, rebase, or leave).
+    Name the commits that exist only on this machine and the commits
+    that exist only on the fork.
+
+  After the user agrees to a reset or a fork merge, go back to the
+  `NEW_UPSTREAM` rules below. Do not recount xAI commits as if the
+  reset fetched them. If the user says leave, jump to Step 7 and
+  Step 8 on the current `HEAD` and do not merge upstream into the
+  diverged tip.
 
 Show how far the **start-of-run** tip is behind the xAI tip:
 
@@ -973,7 +1023,9 @@ re-run verification.
 When the rebuild was **skipped** (`NEW_UPSTREAM` is 0): report the
 existing `grok-local version` line vs `$EXPECTED ($COMMIT12)`. If they differ,
 note the mismatch and that the binary was left as-is — do **not** rebuild
-unless the user asks.
+unless the user asks. A user-approved reset onto a duplicate sync (Step 1)
+is this case: the stamp names the discarded merge, and the semver still
+matches. Say that. Do not rebuild to make the stamp match.
 
 ### 8. Review this skill (mandatory before closing)
 
@@ -1022,7 +1074,7 @@ Summarize for the user:
 
 1. **Sync:** pre/post SHAs (`RUN_START_HEAD`, `HEAD`, `$UPSTREAM_REMOTE/main`),
    `NEW_UPSTREAM` count, and whether local `main` was fast-forwarded onto
-   `$FORK_REMOTE/main`.
+   `$FORK_REMOTE/main`, reset onto a duplicate sync, or left diverged.
 2. **Conflicts:** files (or “none”), resolution summary.
 3. **Fork analysis:** each delta → keep / adapt / drop + one-line rationale;
    include **adjacent re-check** results when upstream touched clipboard /
@@ -1042,8 +1094,11 @@ Summarize for the user:
    skipped).
 6. **Version check:** full `grok-local version` line vs expected
    `$EXPECTED ($COMMIT12)`. After a skip, report mismatch without rebuilding.
-7. **Next steps (optional):** push to `$FORK_REMOTE/main` only if user wants:
-   `git push "$FORK_REMOTE" main` (require confirmation — shared remote).
+7. **Unpushed work:** if `LOCAL_ONLY` > 0 when the run finishes, list the
+   commits that exist only on this machine and say the other machine will
+   diverge on its next sync until `git push "$FORK_REMOTE" main`. Push
+   only when the user asks (shared remote). Do not force-push one
+   machine's merge over the other.
 8. **Skill review:** “no vital updates” or numbered suggestions (Step 8). Never
    omit this section.
 
@@ -1051,6 +1106,9 @@ Summarize for the user:
 
 - Never force-push to the upstream or fork remotes unless the user explicitly requests it.
 - Never `git reset --hard` or discard uncommitted work without confirmation.
+  Step 1's duplicate-sync case may recommend
+  `git reset --hard "$FORK_REMOTE/main"`; still wait for agreement, and
+  never force-push one machine's merge over the other.
 - Prefer resolving conflicts over aborting; abort only on user request or
   unrecoverable state.
 - Do not skip Step 4 (analysis) when there were conflicts or unique fork
@@ -1072,7 +1130,9 @@ Summarize for the user:
 RUN_START_HEAD=$(git rev-parse HEAD)
 git fetch "$UPSTREAM_REMOTE" main
 git fetch "$FORK_REMOTE" main
-# Fork tip (Step 1): ff-only only when strictly behind; continue when the fork tip is already in HEAD; stop only if diverged
+# Fork tip (Step 1): ff-only only when strictly behind; continue when the fork tip is already in HEAD
+# Diverged: same-parent merges with a comment-only tree diff → recommend reset --hard to the fork tip (ask first); do not create a third merge; do not rebuild
+# Other divergence: stop and ask. Unpushed local commits: name them in the report; push only if asked
 # NEW_UPSTREAM is the rev-list count, not whether fetch moved the remote-tracking ref
 git checkout main
 PRE_MERGE_HEAD=$(git rev-parse HEAD)
