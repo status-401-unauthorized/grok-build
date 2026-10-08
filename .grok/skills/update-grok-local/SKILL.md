@@ -26,11 +26,14 @@ for vital updates and show any suggestions to the user before closing.
 Run from the **grok-build** repo root (the tree that contains
 `crates/codegen/xai-grok-pager-bin`).
 
-1. Detect remotes **by fetch URL**, not by name (`origin` / `upstream` /
-   `fork` are swapped on some clones):
+1. Detect remotes **by fetch URL**, not by name. `origin`, `upstream`, and
+   `fork` are not stable roles — the same name is xAI on one clone and the
+   publish target on another. Do not hardcode a name, copy a mapping from
+   another machine, or infer the role from a merge subject (`origin/main`
+   vs `upstream/main`).
    - **Upstream** = remote whose URL contains `xai-org/grok-build`
    - **Fork** = the other `grok-build` remote (this user’s publish target)
-   Abort if upstream cannot be identified.
+   Abort if either remote cannot be identified. Do not guess.
 2. Working tree should be clean enough to merge. If dirty:
    - Prefer stashing only if the user did not intentionally leave WIP.
    - If WIP looks intentional, **stop and ask** before discarding or stashing.
@@ -50,11 +53,11 @@ git rev-parse --short HEAD
 RUN_START_HEAD=$(git rev-parse HEAD)
 echo "RUN_START_HEAD=$RUN_START_HEAD"
 
-# Detect remotes by fetch URL. Names vary (this clone: upstream=xAI, origin=fork).
+# Detect by fetch URL (Preconditions). Print $1 — the remote name only.
 UPSTREAM_REMOTE=$(git remote -v | awk '/github.com[:/]xai-org\/grok-build/ && /fetch/ {print $1; exit}')
 FORK_REMOTE=$(git remote -v | awk '!/github.com[:/]xai-org\/grok-build/ && /grok-build/ && /fetch/ {print $1; exit}')
 echo "UPSTREAM_REMOTE=${UPSTREAM_REMOTE:-MISSING}  FORK_REMOTE=${FORK_REMOTE:-MISSING}"
-# Abort if UPSTREAM_REMOTE is empty.
+# Abort if either variable is empty.
 
 git rev-parse --short "${UPSTREAM_REMOTE}/main" 2>/dev/null || true
 git rev-parse --short "${FORK_REMOTE}/main" 2>/dev/null || true
